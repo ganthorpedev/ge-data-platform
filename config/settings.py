@@ -14,6 +14,10 @@ from dotenv import load_dotenv
 DEFAULT_INSIGHTS_API_URL = "https://insights.za.mixtelematics.com"
 DEFAULT_POSTGRES_PORT = 5432
 DEFAULT_SYNC_LOOKBACK_DAYS = 7
+DEFAULT_TELEMATICS_LOOKBACK_DAYS = 7
+DEFAULT_TELEMATICS_PAGE_SIZE = 50
+DEFAULT_TELEMATICS_LOOKBACK_HOURS = 6
+DEFAULT_TELEMATICS_CHUNK_HOURS = 1
 
 REQUIRED_ENV_VARS = (
     "SENDEM_API_KEY",
@@ -22,6 +26,12 @@ REQUIRED_ENV_VARS = (
     "POSTGRES_DB",
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
+)
+
+REQUIRED_EZYTRACK_ENV_VARS = (
+    "TELEMATICS_GRAPHQL_URL",
+    "TELEMATICS_TOKEN",
+    "TELEMATICS_ORGANISATION_ID",
 )
 
 
@@ -62,4 +72,52 @@ def get_settings() -> Settings:
         postgres_user=os.environ["POSTGRES_USER"],
         postgres_password=os.environ["POSTGRES_PASSWORD"],
         sync_lookback_days=int(os.getenv("SYNC_LOOKBACK_DAYS", DEFAULT_SYNC_LOOKBACK_DAYS)),
+    )
+
+
+@dataclass(frozen=True)
+class EzytrackSettings:
+    """Configuration required to call the EzyTrack / Telematics Guru GraphQL API."""
+
+    graphql_url: str
+    token: str
+    organisation_id: int
+    lookback_days: int
+    page_size: int
+    lookback_hours: int
+    chunk_hours: int
+
+
+def get_ezytrack_settings() -> EzytrackSettings:
+    """Load, validate, and return EzyTrack settings from environment variables.
+
+    Loads `.env` via `python-dotenv` and raises `ValueError` if any required
+    value is missing. The GraphQL URL, token, and organisation id have no
+    defaults (environment/tenant specific).
+
+    lookback_days (default 7) is the older day-granularity window, currently
+    unused now that jobs/sync_ezytrack.py runs in conservative chunked mode.
+    It's kept rather than removed since it's expected to be used again once
+    the provider confirms how its GraphQL cost limit works.
+
+    lookback_hours (default 6) and chunk_hours (default 1) drive the current
+    conservative sync mode: fetch the last `lookback_hours` hours of trips in
+    `chunk_hours`-sized windows, one GraphQL request window at a time.
+
+    page_size (default 50) is shared by both modes.
+    """
+    load_dotenv()
+
+    missing = [name for name in REQUIRED_EZYTRACK_ENV_VARS if not os.getenv(name)]
+    if missing:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+    return EzytrackSettings(
+        graphql_url=os.environ["TELEMATICS_GRAPHQL_URL"],
+        token=os.environ["TELEMATICS_TOKEN"],
+        organisation_id=int(os.environ["TELEMATICS_ORGANISATION_ID"]),
+        lookback_days=int(os.getenv("TELEMATICS_LOOKBACK_DAYS", DEFAULT_TELEMATICS_LOOKBACK_DAYS)),
+        page_size=int(os.getenv("TELEMATICS_PAGE_SIZE", DEFAULT_TELEMATICS_PAGE_SIZE)),
+        lookback_hours=int(os.getenv("TELEMATICS_LOOKBACK_HOURS", DEFAULT_TELEMATICS_LOOKBACK_HOURS)),
+        chunk_hours=int(os.getenv("TELEMATICS_CHUNK_HOURS", DEFAULT_TELEMATICS_CHUNK_HOURS)),
     )

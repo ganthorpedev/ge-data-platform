@@ -1,7 +1,9 @@
-"""Loads Sendem/MiX dataframes into PostgreSQL.
+"""Loads telemetry provider dataframes into PostgreSQL.
 
-This module owns all database writes: connection creation, generic upserts,
-the Sendem raw/staging table load plan, and etl.sync_runs tracking.
+This module owns all database writes: connection creation, the generic
+strict upsert (upsert_dataframe), the per-provider raw/staging table load
+plans (load_sendem_tables, load_ezytrack_tables), and etl.sync_runs /
+etl.sync_table_loads tracking.
 """
 
 from __future__ import annotations
@@ -188,6 +190,42 @@ class PostgresLoader:
                 },
             )
 
+    def _run_load_plan(
+        self,
+        load_plan: list[tuple[str, str, pd.DataFrame, list[str]]],
+        sync_run_id: str | None,
+        provider: str,
+    ) -> dict[str, int]:
+        """Run a (schema, table, dataframe, conflict_columns) load plan.
+
+        Shared by load_sendem_tables and load_ezytrack_tables so the
+        per-table-logging + upsert loop is defined once. If `sync_run_id` is
+        given, each table load is separately recorded in
+        etl.sync_table_loads (started before the upsert, finished after), so
+        a failure partway through leaves a clear per-table record of what
+        succeeded and what did not before the exception propagates to the
+        caller.
+
+        Returns a dict of "schema.table" -> rows loaded.
+        """
+        results: dict[str, int] = {}
+        for schema, table, df, conflict_columns in load_plan:
+            load_id = None
+            if sync_run_id is not None:
+                load_id = self.start_table_load(sync_run_id, provider, schema, table, len(df))
+
+            try:
+                rows_loaded = self.upsert_dataframe(df, schema, table, conflict_columns)
+                results[f"{schema}.{table}"] = rows_loaded
+                if load_id is not None:
+                    self.finish_table_load(load_id, status="SUCCESS", rows_loaded=rows_loaded)
+            except Exception as error:
+                if load_id is not None:
+                    self.finish_table_load(load_id, status="FAILED", error_message=str(error))
+                raise
+
+        return results
+
     def load_sendem_tables(
         self,
         dataframes: dict[str, pd.DataFrame],
@@ -206,10 +244,7 @@ class PostgresLoader:
         so fact rows always join cleanly without raw ever being mutated.
 
         If `sync_run_id` is given, each table load is separately recorded in
-        etl.sync_table_loads (started before the upsert, finished after),
-        so a failure partway through this method leaves a clear per-table
-        record of what succeeded and what did not before the exception
-        propagates to the caller.
+        etl.sync_table_loads. See _run_load_plan for details.
 
         Returns a dict of "schema.table" -> rows loaded.
         """
@@ -246,23 +281,39 @@ class PostgresLoader:
             ),
         ]
 
-        results: dict[str, int] = {}
-        for schema, table, df, conflict_columns in load_plan:
-            load_id = None
-            if sync_run_id is not None:
-                load_id = self.start_table_load(sync_run_id, provider, schema, table, len(df))
+        return self._run_load_plan(load_plan, sync_run_id, provider)
 
-            try:
-                rows_loaded = self.upsert_dataframe(df, schema, table, conflict_columns)
-                results[f"{schema}.{table}"] = rows_loaded
-                if load_id is not None:
-                    self.finish_table_load(load_id, status="SUCCESS", rows_loaded=rows_loaded)
-            except Exception as error:
-                if load_id is not None:
-                    self.finish_table_load(load_id, status="FAILED", error_message=str(error))
-                raise
+    def load_ezytrack_tables(
+        self,
+        dataframes: dict[str, pd.DataFrame],
+        sync_run_id: str | None = None,
+        provider: str = "ezytrack",
+    ) -> dict[str, int]:
+        """Load all EzyTrack raw and staging tables from the given dataframes.
 
-        return results
+        `dataframes` is expected to contain exactly: raw_assets_df,
+        raw_trips_df, dim_assets_df, fact_trips_df (as produced by
+        transforms.ezytrack_transform.build_all()). Raises `ValueError` if
+        any of these keys are missing -- it does not guess or substitute.
+
+        If `sync_run_id` is given, each table load is separately recorded in
+        etl.sync_table_loads. See _run_load_plan for details.
+
+        Returns a dict of "schema.table" -> rows loaded.
+        """
+        required_keys = ("raw_assets_df", "raw_trips_df", "dim_assets_df", "fact_trips_df")
+        missing_keys = [key for key in required_keys if key not in dataframes]
+        if missing_keys:
+            raise ValueError(f"Missing required EzyTrack dataframe keys: {missing_keys}")
+
+        load_plan = [
+            ("raw", "ezytrack_assets", dataframes["raw_assets_df"], ["asset_id"]),
+            ("raw", "ezytrack_trips", dataframes["raw_trips_df"], ["trip_id"]),
+            ("staging", "ezytrack_dim_assets", dataframes["dim_assets_df"], ["asset_id"]),
+            ("staging", "ezytrack_fact_trips", dataframes["fact_trips_df"], ["trip_id"]),
+        ]
+
+        return self._run_load_plan(load_plan, sync_run_id, provider)
 
     def start_sync_run(
         self,
