@@ -1,0 +1,26 @@
+﻿# Environment files
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs and generated exports
+*.log
+*.csv
+*.xlsx
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
