@@ -2,8 +2,8 @@
 
 This module owns all database writes: connection creation, the generic
 strict upsert (upsert_dataframe), the per-provider raw/staging table load
-plans (load_sendem_tables, load_ezytrack_tables), and etl.sync_runs /
-etl.sync_table_loads tracking.
+plans (load_sendem_tables, load_ezytrack_tables, load_trackunit_tables), and
+etl.sync_runs / etl.sync_table_loads tracking.
 """
 
 from __future__ import annotations
@@ -311,6 +311,95 @@ class PostgresLoader:
             ("raw", "ezytrack_trips", dataframes["raw_trips_df"], ["trip_id"]),
             ("staging", "ezytrack_dim_assets", dataframes["dim_assets_df"], ["asset_id"]),
             ("staging", "ezytrack_fact_trips", dataframes["fact_trips_df"], ["trip_id"]),
+        ]
+
+        return self._run_load_plan(load_plan, sync_run_id, provider)
+
+    def load_trackunit_tables(
+        self,
+        dataframes: dict[str, pd.DataFrame],
+        sync_run_id: str | None = None,
+        provider: str = "trackunit",
+    ) -> dict[str, int]:
+        """Load all Trackunit raw and staging tables from the given dataframes.
+
+        `dataframes` is expected to contain exactly: raw_assets_df,
+        raw_operating_hours_df, raw_moving_hours_df, raw_distance_df,
+        dim_assets_df, daily_activity_df (as produced by
+        transforms.trackunit_transform.build_daily_activity_rows()). Raises
+        `ValueError` if any of these keys are missing.
+
+        If `sync_run_id` is given, each table load is separately recorded in
+        etl.sync_table_loads. See _run_load_plan for details.
+
+        Returns a dict of "schema.table" -> rows loaded.
+        """
+        required_keys = (
+            "raw_assets_df",
+            "raw_operating_hours_df",
+            "raw_moving_hours_df",
+            "raw_distance_df",
+            "dim_assets_df",
+            "daily_activity_df",
+        )
+        missing_keys = [key for key in required_keys if key not in dataframes]
+        if missing_keys:
+            raise ValueError(f"Missing required Trackunit dataframe keys: {missing_keys}")
+
+        metric_conflict_columns = ["asset_id", "metric_timestamp_utc", "metric_name"]
+
+        load_plan = [
+            ("raw", "trackunit_assets", dataframes["raw_assets_df"], ["asset_id"]),
+            ("raw", "trackunit_aemp_operating_hours", dataframes["raw_operating_hours_df"], metric_conflict_columns),
+            ("raw", "trackunit_aemp_moving_hours", dataframes["raw_moving_hours_df"], metric_conflict_columns),
+            ("raw", "trackunit_aemp_distance", dataframes["raw_distance_df"], metric_conflict_columns),
+            ("staging", "trackunit_dim_assets", dataframes["dim_assets_df"], ["asset_id"]),
+            (
+                "staging",
+                "trackunit_daily_activity",
+                dataframes["daily_activity_df"],
+                ["report_date", "asset_id"],
+            ),
+        ]
+
+        return self._run_load_plan(load_plan, sync_run_id, provider)
+
+    def load_trackunit_location_enrichment(
+        self,
+        dataframes: dict[str, pd.DataFrame],
+        sync_run_id: str | None = None,
+        provider: str = "trackunit_location",
+    ) -> dict[str, int]:
+        """Load Trackunit location-enrichment raw and staging tables.
+
+        Separate from load_trackunit_tables (the working metric ETL) --
+        this only ever touches raw.trackunit_aemp_locations,
+        raw.trackunit_site_history, raw.trackunit_sites, and
+        staging.trackunit_location_enrichment. `dataframes` is expected to
+        contain exactly: raw_locations_df, raw_site_history_df, raw_sites_df,
+        enrichment_df (as produced by jobs/sync_trackunit_location_enrichment.py).
+        Raises `ValueError` if any of these keys are missing.
+
+        If `sync_run_id` is given, each table load is separately recorded in
+        etl.sync_table_loads. See _run_load_plan for details.
+
+        Returns a dict of "schema.table" -> rows loaded.
+        """
+        required_keys = ("raw_locations_df", "raw_site_history_df", "raw_sites_df", "enrichment_df")
+        missing_keys = [key for key in required_keys if key not in dataframes]
+        if missing_keys:
+            raise ValueError(f"Missing required Trackunit location enrichment dataframe keys: {missing_keys}")
+
+        load_plan = [
+            ("raw", "trackunit_aemp_locations", dataframes["raw_locations_df"], ["asset_id", "location_timestamp_utc"]),
+            ("raw", "trackunit_site_history", dataframes["raw_site_history_df"], ["asset_id", "site_id", "entered_at"]),
+            ("raw", "trackunit_sites", dataframes["raw_sites_df"], ["site_id"]),
+            (
+                "staging",
+                "trackunit_location_enrichment",
+                dataframes["enrichment_df"],
+                ["report_date", "asset_id"],
+            ),
         ]
 
         return self._run_load_plan(load_plan, sync_run_id, provider)

@@ -16,6 +16,18 @@ the whole run is marked FAILED with that chunk's window in error_message,
 and the exception is re-raised. There is no partial SUCCESS -- either every
 chunk fetches cleanly and the transformed/deduplicated result is loaded, or
 nothing is loaded and the run is marked FAILED.
+
+AUTHENTICATION:
+This job authenticates once, explicitly, right after starting the sync_run
+row -- see connectors.ezytrack_client.EzytrackClient. Telematics Guru access
+tokens expire after ~24h, so the token is never read from a static .env
+value; it's fetched fresh every run and held in memory only. An auth
+failure marks the run FAILED with a safe message (never the username,
+password, or token). A mid-run 401/AUTH_NOT_AUTHENTICATED triggers exactly
+one re-authenticate + one retry inside the client; if that also fails, it
+propagates like any other chunk failure. This is unrelated to
+RateLimitError (GraphQL cost limit) -- token refresh is never used to work
+around a rate limit, and a rate limit is never retried automatically.
 """
 
 from __future__ import annotations
@@ -24,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config.settings import EzytrackSettings, get_ezytrack_settings, get_settings
-from connectors.ezytrack_client import fetch_ezytrack_assets, fetch_ezytrack_trips
+from connectors.ezytrack_client import EzytrackClient
 from loaders.postgres_loader import PostgresLoader
 from transforms.ezytrack_transform import build_all
 
@@ -77,6 +89,7 @@ def _dedupe_trips_by_id(trips: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _fetch_trips_for_chunk(
+    client: EzytrackClient,
     chunk_start: datetime,
     chunk_end: datetime,
     ezytrack_settings: EzytrackSettings,
@@ -92,12 +105,7 @@ def _fetch_trips_for_chunk(
     print(f"Fetching EzyTrack trips chunk: {chunk_start_str} to {chunk_end_str}")
 
     try:
-        return fetch_ezytrack_trips(
-            chunk_start_str,
-            chunk_end_str,
-            page_size=ezytrack_settings.page_size,
-            settings=ezytrack_settings,
-        )
+        return client.fetch_trips(chunk_start_str, chunk_end_str, page_size=ezytrack_settings.page_size)
     except Exception as error:
         raise RuntimeError(
             f"EzyTrack trip chunk failed ({chunk_start_str} to {chunk_end_str}): {error}"
@@ -125,6 +133,7 @@ def run() -> None:
     )
 
     loader = PostgresLoader(postgres_settings)
+    client = EzytrackClient(ezytrack_settings)
 
     print("Starting sync run...")
     sync_run_id = loader.start_sync_run(
@@ -136,12 +145,15 @@ def run() -> None:
     print(f"sync_run_id: {sync_run_id}")
 
     try:
+        print("Authenticating with EzyTrack / Telematics Guru...")
+        client.authenticate()
+
         print("Fetching EzyTrack assets...")
-        assets = fetch_ezytrack_assets(ezytrack_settings)
+        assets = client.fetch_assets()
 
         all_trips: list[dict[str, Any]] = []
         for chunk_start, chunk_end in chunk_windows:
-            chunk_trips = _fetch_trips_for_chunk(chunk_start, chunk_end, ezytrack_settings)
+            chunk_trips = _fetch_trips_for_chunk(client, chunk_start, chunk_end, ezytrack_settings)
             all_trips.extend(chunk_trips)
 
         deduped_trips = _dedupe_trips_by_id(all_trips)
