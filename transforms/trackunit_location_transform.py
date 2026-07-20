@@ -48,6 +48,7 @@ STATUS_NOT_APPLICABLE = "NOT_APPLICABLE_ZERO_ACTIVITY"
 STATUS_ENRICHED = "ENRICHED"
 STATUS_PARTIAL = "PARTIAL"
 STATUS_NOT_FOUND = "NOT_FOUND"
+STATUS_SITE_ACCESS_DENIED = "SITE_ACCESS_DENIED"
 
 
 def extract_location_points(aemp_response: dict[str, Any]) -> list[dict[str, Any]]:
@@ -200,6 +201,7 @@ def compute_enrichment_status(
     stop_point_found: bool,
     start_zone_found: bool,
     stop_zone_found: bool,
+    site_access_denied: bool = False,
 ) -> str:
     """Decide the one location_enrichment_status value for a row.
 
@@ -208,13 +210,18 @@ def compute_enrichment_status(
     transforms/trackunit_transform.py's zero-row rule).
     ENRICHED: both a location point and a zone were found for both boundaries.
     NOT_FOUND: neither a location point nor a zone was found for either boundary.
-    PARTIAL: anything in between (e.g. location found but zone missing, or
-    only one boundary resolved).
+    SITE_ACCESS_DENIED: a site-detail lookup for this asset was refused
+    (403) and nothing else (no point, no zone name) was resolved either.
+    PARTIAL: anything in between (e.g. location found but zone missing,
+    only one boundary resolved, or a site-detail 403 that still left some
+    other data resolved).
     """
     if not had_boundaries:
         return STATUS_NOT_APPLICABLE
 
     found_flags = [start_point_found, stop_point_found, start_zone_found, stop_zone_found]
+    if site_access_denied:
+        return STATUS_PARTIAL if any(found_flags) else STATUS_SITE_ACCESS_DENIED
     if all(found_flags):
         return STATUS_ENRICHED
     if not any(found_flags):
@@ -231,10 +238,13 @@ def build_enrichment_row(
     stop_point: dict[str, Any] | None,
     start_zone_name: str | None,
     stop_zone_name: str | None,
+    site_access_denied: bool = False,
 ) -> dict[str, Any]:
     """Build one staging.trackunit_location_enrichment row.
 
     Address/zip/city/country are always None -- see module docstring.
+    `site_access_denied` should be True if a site-detail lookup for either
+    boundary's site got a 403 -- see STATUS_SITE_ACCESS_DENIED.
     """
     status = compute_enrichment_status(
         had_boundaries=had_boundaries,
@@ -242,6 +252,7 @@ def build_enrichment_row(
         stop_point_found=stop_point is not None,
         start_zone_found=start_zone_name is not None,
         stop_zone_found=stop_zone_name is not None,
+        site_access_denied=site_access_denied,
     )
 
     start_ts_utc = start_point["datetime"] if start_point else None

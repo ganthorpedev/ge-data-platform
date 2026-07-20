@@ -29,8 +29,13 @@ reverse geocoding here.
 
 API safety: one AEMP/Site call at a time, 1-second pause between calls, no
 retry loops. A site name is only resolved once per run per distinct site id
-(cached), not once per asset. Any failure stops the whole run immediately
-and marks etl.sync_runs FAILED.
+(cached), not once per asset. A site-detail 403 (this account cannot see
+that specific site) is non-fatal: it is logged, the denied site_id is
+cached so it is never requested again this run, and the affected asset's
+row is marked PARTIAL/SITE_ACCESS_DENIED instead of aborting the sync. All
+other failures (auth-wide 401, database errors, invalid responses,
+exhausted 429/5xx retries) still stop the whole run and mark etl.sync_runs
+FAILED.
 """
 
 from __future__ import annotations
@@ -44,13 +49,17 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from config.settings import get_settings, get_trackunit_settings
-from connectors.trackunit_client import TrackunitClient
+from connectors.trackunit_client import TrackunitClient, TrackunitSiteAccessDeniedError
 from loaders.postgres_loader import PostgresLoader
 from transforms.trackunit_location_transform import (
     ENRICHMENT_COLUMNS,
     RAW_LOCATION_COLUMNS,
     RAW_SITE_COLUMNS,
     RAW_SITE_HISTORY_COLUMNS,
+    STATUS_ENRICHED,
+    STATUS_NOT_FOUND,
+    STATUS_PARTIAL,
+    STATUS_SITE_ACCESS_DENIED,
     build_enrichment_row,
     build_raw_location_rows,
     build_raw_site_history_rows,
@@ -59,6 +68,11 @@ from transforms.trackunit_location_transform import (
     find_active_site_id,
     latest_point_at_or_before,
 )
+
+# Sentinel stored in site_cache for a site_id that returned 403 -- lets us
+# skip re-requesting it for the rest of the run without treating it the same
+# as an unresolved/never-looked-up site.
+_SITE_ACCESS_DENIED = object()
 
 SOURCE_SYSTEM = "trackunit_location"
 JOB_NAME = "trackunit_location_enrichment_sync"
@@ -165,15 +179,37 @@ def _enrich_one_asset(
 
     raw_site_rows = []
     for site_id in {sid for sid in (start_site_id, stop_site_id) if sid is not None}:
-        if site_id not in site_cache:
-            print(f"  [{row['machine']}] resolving site name for {site_id}...")
+        if site_id in site_cache:
+            continue
+        print(f"  [{row['machine']}] resolving site name for {site_id}...")
+        try:
             site_detail = client.get_site(site_id)
-            site_cache[site_id] = site_detail
-            raw_site_rows.append(build_raw_site_row(site_id, site_detail))
-            time.sleep(API_CALL_PAUSE_SECONDS)
+        except TrackunitSiteAccessDeniedError:
+            print(
+                f"  WARNING [{row['machine']}] site access denied (403) for site_id={site_id}; "
+                f"continuing with any name already known from Site History."
+            )
+            site_cache[site_id] = _SITE_ACCESS_DENIED
+            continue
+        site_cache[site_id] = site_detail
+        raw_site_rows.append(build_raw_site_row(site_id, site_detail))
+        time.sleep(API_CALL_PAUSE_SECONDS)
 
-    start_zone_name = site_cache[start_site_id].get("name") if start_site_id else None
-    stop_zone_name = site_cache[stop_site_id].get("name") if stop_site_id else None
+    def _zone_name(site_id: str | None) -> str | None:
+        if site_id is None:
+            return None
+        cached = site_cache.get(site_id)
+        if cached is None or cached is _SITE_ACCESS_DENIED:
+            return None
+        return cached.get("name")
+
+    start_zone_name = _zone_name(start_site_id)
+    stop_zone_name = _zone_name(stop_site_id)
+
+    site_access_denied = any(
+        site_id is not None and site_cache.get(site_id) is _SITE_ACCESS_DENIED
+        for site_id in (start_site_id, stop_site_id)
+    )
 
     enrichment_row = build_enrichment_row(
         report_date=report_date,
@@ -184,6 +220,7 @@ def _enrich_one_asset(
         stop_point=stop_point,
         start_zone_name=start_zone_name,
         stop_zone_name=stop_zone_name,
+        site_access_denied=site_access_denied,
     )
 
     raw_location_rows = build_raw_location_rows(asset_id, report_date, "start", start_points) + build_raw_location_rows(
@@ -242,6 +279,23 @@ def run(report_date: date, machines: list[str] | None = None, limit: int | None 
             all_location_rows.extend(location_rows)
             all_site_history_rows.extend(site_history_rows)
             all_site_rows.extend(site_rows)
+
+        status_counts = {row["location_enrichment_status"]: 0 for row in enrichment_rows}
+        for enrichment_row in enrichment_rows:
+            status_counts[enrichment_row["location_enrichment_status"]] += 1
+        summary_counts = {
+            "enriched": status_counts.get(STATUS_ENRICHED, 0),
+            "partial": status_counts.get(STATUS_PARTIAL, 0),
+            "site_access_denied": status_counts.get(STATUS_SITE_ACCESS_DENIED, 0),
+            "failed": status_counts.get(STATUS_NOT_FOUND, 0),
+        }
+        print(
+            "Enrichment summary: "
+            f"enriched={summary_counts['enriched']} "
+            f"partial={summary_counts['partial']} "
+            f"site_access_denied={summary_counts['site_access_denied']} "
+            f"failed={summary_counts['failed']}"
+        )
 
         # The start/stop 48h lookback windows commonly overlap (they're both
         # anchored within the same report day), so the same asset_id +

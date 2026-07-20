@@ -32,6 +32,20 @@ SUPPORTED_METRICS = {
 }
 
 
+class TrackunitSiteAccessDeniedError(RuntimeError):
+    """Raised only for a 403 on GET /sites/{site_id} -- non-fatal to callers.
+
+    A 403 here means this account cannot see that specific site, not that
+    auth is broken (that's a 401, still raised as a plain RuntimeError).
+    Callers should catch this specifically and continue enrichment without
+    failing the whole run -- see jobs/sync_trackunit_location_enrichment.py.
+    """
+
+    def __init__(self, site_id: str) -> None:
+        self.site_id = site_id
+        super().__init__(f"Trackunit get_site access denied (403) for site_id={site_id}")
+
+
 class TrackunitClient:
     """Thin wrapper around the Trackunit IRIS asset API and AEMP time-series API."""
 
@@ -191,12 +205,15 @@ class TrackunitClient:
 
         GET {site_base_url}/sites/{site_id}. Site History only returns a
         siteId, not a name, so this resolves it -- proven in the exploration
-        notebook (section 42G). Raises `RuntimeError` on any non-200
-        response.
+        notebook (section 42G). Raises `TrackunitSiteAccessDeniedError` on a
+        403 (this account cannot see that site -- non-fatal, do not retry)
+        and `RuntimeError` on any other non-200 response.
         """
         url = f"{self.settings.site_base_url}/sites/{site_id}"
         response = self.session.get(url, headers=self._auth_headers(), timeout=30)
 
+        if response.status_code == 403:
+            raise TrackunitSiteAccessDeniedError(site_id)
         if not response.ok:
             raise RuntimeError(f"Trackunit get_site failed: {response.status_code} {response.text[:500]}")
 
