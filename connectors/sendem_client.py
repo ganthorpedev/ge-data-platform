@@ -6,9 +6,8 @@ Transform and loader modules must not make HTTP calls directly.
 
 from __future__ import annotations
 
-import requests
-
-from config.settings import Settings, get_settings
+from config.settings import Settings, get_http_settings, get_settings
+from utils.http import build_retrying_session
 
 
 class SendemClient:
@@ -18,7 +17,8 @@ class SendemClient:
         """Store settings and prepare a `requests.Session` for all calls."""
         self.settings = settings
         self.base_url = settings.insights_api_url
-        self.session = requests.Session()
+        self.http_settings = get_http_settings()
+        self.session = build_retrying_session(self.http_settings)
         self.session.headers.update(
             {
                 "X-API-KEY": settings.sendem_api_key,
@@ -33,7 +33,7 @@ class SendemClient:
         the request fails.
         """
         url = f"{self.base_url}{endpoint}"
-        response = self.session.get(url, params=params, timeout=60)
+        response = self.session.get(url, params=params, timeout=self.http_settings.timeout)
 
         if not response.ok:
             raise RuntimeError(

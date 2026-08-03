@@ -9,20 +9,39 @@ raw API records/JSON only -- it does not shape data into database columns
 (that belongs in transforms/trackunit_transform.py) and does not write to
 PostgreSQL.
 
-Failures are never swallowed: a 429 or any other non-200 response raises a
-clear `RuntimeError` immediately. Callers (jobs/sync_trackunit_daily_activity.py)
-are responsible for pacing calls (sleeping between AEMP requests) -- this
-client makes one request per call and does not retry or rate-limit itself.
+Retry policy (all handled here, so callers never sleep or retry themselves):
+
+- 401 on any authenticated request: refresh the OAuth token and retry that
+  request exactly once. A second 401 raises a descriptive RuntimeError --
+  there is no unlimited auth loop.
+- 429 on any authenticated request: wait using the server's Retry-After
+  header (seconds form) when present and valid, otherwise exponential
+  backoff from `rate_limit_base_delay_seconds`; either way capped at
+  `rate_limit_max_delay_seconds` plus 0-3s random jitter. `max_retries` is
+  treated as the maximum total attempts (default 7), including the first.
+- Transient failures (connection errors, timeouts, HTTP 500/502/503/504):
+  up to HTTP_MAX_RETRIES total attempts (default 3) with exponential
+  backoff from HTTP_BACKOFF_SECONDS. This client deliberately does NOT use
+  utils.http's adapter-level retries, so retries are never doubled up.
+- Any other non-200 (403 on get_site excepted) raises immediately. Ordinary
+  4xx responses are never retried.
 """
 
 from __future__ import annotations
 
 import base64
+import logging
+import random
+import time
 from typing import Any
 
 import requests
 
-from config.settings import TrackunitSettings, get_trackunit_settings
+from config.settings import HttpSettings, TrackunitSettings, get_http_settings, get_trackunit_settings
+
+TRANSIENT_STATUS_CODES = (500, 502, 503, 504)
+
+logger = logging.getLogger(__name__)
 
 # Maps the AEMP path segment (metric_name) to the JSON key it returns under.
 SUPPORTED_METRICS = {
@@ -30,6 +49,46 @@ SUPPORTED_METRICS = {
     "CumulativeMovingHours": "cumulativeMovingHours",
     "Distance": "distance",
 }
+
+
+def _parse_retry_after_seconds(header_value: str | None) -> float | None:
+    """Parse an HTTP `Retry-After` header as a non-negative number of seconds.
+
+    Returns None if the header is missing, not a plain number (e.g. an
+    HTTP-date), or negative -- callers should fall back to exponential
+    backoff in that case.
+    """
+    if not header_value:
+        return None
+    try:
+        seconds = float(header_value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _rate_limit_wait_seconds(
+    retry_after_header: str | None,
+    attempt: int,
+    base_delay_seconds: float,
+    max_delay_seconds: float,
+) -> float:
+    """Compute how long to wait before retrying a 429, in seconds.
+
+    Prefers the server's `Retry-After` header when present and valid;
+    otherwise falls back to exponential backoff from `base_delay_seconds`
+    (attempt 1 -> base, attempt 2 -> base*2, ...). Either way the wait is
+    capped at `max_delay_seconds` and then given 0-3 seconds of random
+    jitter, so concurrent callers don't retry in lockstep.
+    """
+    retry_after = _parse_retry_after_seconds(retry_after_header)
+    if retry_after is not None:
+        wait_seconds = retry_after
+    else:
+        wait_seconds = base_delay_seconds * (2 ** (attempt - 1))
+
+    wait_seconds = min(wait_seconds, max_delay_seconds)
+    return wait_seconds + random.uniform(0, 3)
 
 
 class TrackunitSiteAccessDeniedError(RuntimeError):
@@ -49,11 +108,73 @@ class TrackunitSiteAccessDeniedError(RuntimeError):
 class TrackunitClient:
     """Thin wrapper around the Trackunit IRIS asset API and AEMP time-series API."""
 
-    def __init__(self, settings: TrackunitSettings | None = None) -> None:
+    def __init__(
+        self,
+        settings: TrackunitSettings | None = None,
+        http_settings: HttpSettings | None = None,
+    ) -> None:
         """Store settings and prepare a `requests.Session` for all calls."""
         self.settings = settings or get_trackunit_settings()
+        self.http_settings = http_settings or get_http_settings()
         self.session = requests.Session()
         self._access_token: str | None = None
+
+    def _request_transient_retry(self, method: str, url: str, *, context: str, **kwargs: Any) -> requests.Response:
+        """Issue one HTTP request, retrying only transient failures.
+
+        Transient means: connection errors, timeouts, and HTTP 500/502/503/504.
+        Up to `http_settings.max_retries` total attempts (default 3) with
+        exponential backoff from `http_settings.backoff_seconds`. Anything
+        else (including every ordinary 4xx) is returned to the caller
+        untouched -- 401/429 policy lives in `_authorized_get`, not here.
+        """
+        kwargs.setdefault("timeout", self.http_settings.timeout)
+        max_attempts = max(1, self.http_settings.max_retries)
+        attempt = 0
+
+        while True:
+            attempt += 1
+            try:
+                response = self.session.request(method, url, **kwargs)
+            except (requests.ConnectionError, requests.Timeout) as error:
+                if attempt >= max_attempts:
+                    raise RuntimeError(
+                        f"Trackunit request failed after {attempt} attempt(s) ({context}): "
+                        f"{type(error).__name__}"
+                    ) from error
+                wait_seconds = self.http_settings.backoff_seconds * (2 ** (attempt - 1))
+                logger.warning(
+                    "Trackunit transient network failure type=%s context=%s "
+                    "attempt=%s/%s wait_seconds=%.1f",
+                    type(error).__name__,
+                    context,
+                    attempt,
+                    max_attempts,
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            if response.status_code in TRANSIENT_STATUS_CODES:
+                if attempt >= max_attempts:
+                    raise RuntimeError(
+                        f"Trackunit request failed with HTTP {response.status_code} after "
+                        f"{attempt} attempt(s) ({context}): {response.text[:500]}"
+                    )
+                wait_seconds = self.http_settings.backoff_seconds * (2 ** (attempt - 1))
+                logger.warning(
+                    "Trackunit transient HTTP failure status=%s context=%s "
+                    "attempt=%s/%s wait_seconds=%.1f",
+                    response.status_code,
+                    context,
+                    attempt,
+                    max_attempts,
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            return response
 
     def authenticate(self) -> str:
         """Request a new OAuth token via the Trackunit password flow and store it.
@@ -64,8 +185,10 @@ class TrackunitClient:
             f"{self.settings.client_id}:{self.settings.client_secret}".encode()
         ).decode()
 
-        response = self.session.post(
+        response = self._request_transient_retry(
+            "POST",
             self.settings.token_url,
+            context="authenticate",
             headers={
                 "Authorization": f"Basic {basic_credentials}",
                 "Content-Type": "application/x-www-form-urlencoded",
@@ -76,7 +199,6 @@ class TrackunitClient:
                 "password": self.settings.password,
                 "scope": self.settings.scope,
             },
-            timeout=30,
         )
 
         if not response.ok:
@@ -91,6 +213,77 @@ class TrackunitClient:
             self.authenticate()
         return {"Authorization": f"Bearer {self._access_token}", "Accept": "application/json"}
 
+    def _authorized_get(
+        self,
+        url: str,
+        *,
+        context: str,
+        params: dict[str, Any] | None = None,
+        metric: str | None = None,
+        pin: str | None = None,
+    ) -> requests.Response:
+        """GET `url` with auth, refreshing the token once on a 401.
+
+        Every authenticated Trackunit GET goes through here. On a 401 the
+        OAuth token is refreshed and the request retried exactly once; a
+        second 401 raises a descriptive error (no unlimited auth loop). Every
+        429 is retried with Retry-After / exponential backoff, with
+        `settings.max_retries` interpreted as the maximum TOTAL number of 429
+        attempts (not retries after the first request). Transient failures are
+        retried by `_request_transient_retry` underneath.
+        """
+        token_refreshed = False
+        rate_limit_attempt = 0
+
+        while True:
+            response = self._request_transient_retry(
+                "GET", url, context=context, headers=self._auth_headers(), params=params
+            )
+
+            if response.status_code == 401:
+                if token_refreshed:
+                    raise RuntimeError(
+                        f"Trackunit request still unauthorized (401) after a token refresh ({context}). "
+                        "Check TRACKUNIT_* credentials."
+                    )
+                logger.warning(
+                    "Trackunit token expired status=401 context=%s; refreshing token and retrying once",
+                    context,
+                )
+                self.authenticate()
+                token_refreshed = True
+                continue
+
+            if response.status_code == 429:
+                rate_limit_attempt += 1
+                max_attempts = max(1, self.settings.max_retries)
+                if rate_limit_attempt >= max_attempts:
+                    raise RuntimeError(
+                        f"Trackunit rate limited (429) after {rate_limit_attempt} attempt(s) "
+                        f"(metric={metric or '-'}, pin={pin or '-'}, context={context}): "
+                        f"{response.text[:500]}"
+                    )
+                wait_seconds = _rate_limit_wait_seconds(
+                    response.headers.get("Retry-After"),
+                    rate_limit_attempt,
+                    self.settings.rate_limit_base_delay_seconds,
+                    self.settings.rate_limit_max_delay_seconds,
+                )
+                logger.warning(
+                    "Trackunit rate limited status=429 metric=%s pin=%s context=%s "
+                    "attempt=%s/%s wait_seconds=%.1f",
+                    metric or "-",
+                    pin or "-",
+                    context,
+                    rate_limit_attempt,
+                    max_attempts,
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            return response
+
     def get_assets(self, page: int = 0, size: int = 100) -> dict[str, Any]:
         """Fetch one page of assets from GET /v1/assets. Returns the raw paginated envelope.
 
@@ -98,11 +291,9 @@ class TrackunitClient:
         raising. Raises `RuntimeError` on any other non-200 response.
         """
         url = f"{self.settings.asset_base_url}/v1/assets"
-        response = self.session.get(url, headers=self._auth_headers(), params={"page": page, "size": size}, timeout=30)
-
-        if response.status_code == 401:
-            self.authenticate()
-            response = self.session.get(url, headers=self._auth_headers(), params={"page": page, "size": size}, timeout=30)
+        response = self._authorized_get(
+            url, context=f"get_assets page={page}", params={"page": page, "size": size}
+        )
 
         if not response.ok:
             raise RuntimeError(f"Trackunit get_assets failed: {response.status_code} {response.text[:500]}")
@@ -148,20 +339,35 @@ class TrackunitClient:
         `end_utc` are ISO-8601 UTC strings, passed straight through -- no
         timestamp conversion happens here. AEMP pagination starts at page 1.
 
-        Raises `RuntimeError` on a 429 (rate limited) or any other non-200
-        response -- never returns partial/failed data silently.
+        Paces itself using `TrackunitSettings.request_delay_seconds` (default
+        1s) before the request. On a 429, waits using the server's
+        `Retry-After` header when present and valid, or exponential backoff
+        starting at `rate_limit_base_delay_seconds` (default 30s) otherwise
+        -- either way capped at `rate_limit_max_delay_seconds` (default 300s)
+        plus 0-3s jitter -- with at most `max_retries` total 429 attempts
+        (default 7) before raising a descriptive `RuntimeError`. A 401 mid-run refreshes
+        the token and retries once; transient failures (connection errors,
+        timeouts, 5xx) are retried up to HTTP_MAX_RETRIES times -- all inside
+        `_authorized_get`.
+
+        Raises `RuntimeError` on a 429 that exhausts all retries, or on any
+        other non-200 response -- never returns partial/failed data silently.
         """
         url = (
             f"{self.settings.aemp_base_url}/{self.settings.account_id}/Fleet/Equipment/ID/{pin}"
             f"/{metric_name}/{start_utc}/{end_utc}/{page}"
         )
 
-        response = self.session.get(url, headers=self._auth_headers(), timeout=30)
+        if self.settings.request_delay_seconds > 0:
+            time.sleep(self.settings.request_delay_seconds)
 
-        if response.status_code == 429:
-            raise RuntimeError(
-                f"Trackunit AEMP rate limited (429) for {metric_name} (pin={pin}): {response.text[:500]}"
-            )
+        response = self._authorized_get(
+            url,
+            context=f"AEMP metric={metric_name} pin={pin}",
+            metric=metric_name,
+            pin=pin,
+        )
+
         if not response.ok:
             raise RuntimeError(
                 f"Trackunit AEMP request failed ({response.status_code}) for {metric_name} "
@@ -170,9 +376,12 @@ class TrackunitClient:
 
         response_json = response.json()
         if isinstance(response_json, dict) and metric_key not in response_json:
-            print(
-                f"  Warning: expected key '{metric_key}' not found in AEMP response for "
-                f"{metric_name} (pin={pin}). Keys present: {list(response_json.keys())}"
+            logger.warning(
+                "Expected key %s not found in Trackunit AEMP response metric=%s pin=%s keys=%s",
+                metric_key,
+                metric_name,
+                pin,
+                list(response_json.keys()),
             )
 
         return response_json
@@ -188,11 +397,10 @@ class TrackunitClient:
         response.
         """
         url = f"{self.settings.site_base_url}/sites/history"
-        response = self.session.get(
+        response = self._authorized_get(
             url,
-            headers=self._auth_headers(),
+            context=f"get_site_history asset_id={asset_id}",
             params={"assetIds": asset_id, "fromTime": from_time_utc, "toTime": to_time_utc, "page": 0, "size": 50},
-            timeout=30,
         )
 
         if not response.ok:
@@ -210,7 +418,7 @@ class TrackunitClient:
         and `RuntimeError` on any other non-200 response.
         """
         url = f"{self.settings.site_base_url}/sites/{site_id}"
-        response = self.session.get(url, headers=self._auth_headers(), timeout=30)
+        response = self._authorized_get(url, context=f"get_site site_id={site_id}")
 
         if response.status_code == 403:
             raise TrackunitSiteAccessDeniedError(site_id)

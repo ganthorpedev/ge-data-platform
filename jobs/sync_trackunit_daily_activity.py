@@ -20,7 +20,7 @@ Other examples:
     # 20-machine controlled run
     python -m jobs.sync_trackunit_daily_activity --date 2026-07-05 --limit 20
 
-    # Rolling scheduler run (hourly today, refresh yesterday for late-arriving data)
+    # Normal daily scheduler run (today plus yesterday for late-arriving data)
     python -m jobs.sync_trackunit_daily_activity --rolling-days 2
 
     # 7-day reconciliation
@@ -41,34 +41,35 @@ a UTC window or a specific date; dates only ever come from CLI arguments or
 re-running the same date, range, or rolling window updates existing rows
 rather than duplicating them. Nothing here truncates or deletes rows.
 
-V1 API safety: one AEMP call at a time, 1-second pause between calls, no
-parallel requests, no retry loops. Any failure (including a 429) stops the
-whole run immediately and marks etl.sync_runs FAILED -- there is no
-partial-success mode, even across a multi-date backfill/rolling run.
+V1 API safety: one AEMP call at a time, no parallel requests. Pacing between
+calls and 429 backoff/retry are handled inside connectors.trackunit_client
+(TrackunitClient.get_aemp_series), configured via TrackunitSettings -- this
+job does not sleep or retry itself. Any failure that exhausts those retries
+(or any other non-retryable error) stops the whole run immediately and marks
+etl.sync_runs FAILED -- there is no partial-success mode, even across a
+multi-date backfill/rolling run.
 """
 
 from __future__ import annotations
 
 import argparse
-import time
+import logging
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
 
-from config.settings import get_settings, get_trackunit_settings
+from config.settings import get_etl_ops_settings, get_settings, get_trackunit_settings
 from connectors.trackunit_client import TrackunitClient
-from loaders.postgres_loader import PostgresLoader
+from loaders.postgres_loader import PostgresLoader, finish_sync_run_failed_safe
 from transforms.trackunit_transform import build_daily_activity_rows, extract_metric_points, local_report_day_to_utc_window
+from utils.dates import local_today, to_date_key
+from utils.logging_config import configure_logging
+from utils.overlap_lock import TRACKUNIT_OVERLAP_GROUP, provider_job_lock
 
 SOURCE_SYSTEM = "trackunit"
 JOB_NAME = "trackunit_daily_activity_sync"
 
-AEMP_CALL_PAUSE_SECONDS = 1
 DEFAULT_ROLLING_DAYS = 2
 
-
-def _to_date_key(value: date) -> int:
-    """Convert a date to its YYYYMMDD integer representation (etl.sync_runs convention)."""
-    return int(value.strftime("%Y%m%d"))
+logger = logging.getLogger(__name__)
 
 
 def _parse_date(value: str) -> date:
@@ -94,7 +95,7 @@ def _rolling_dates(rolling_days: int, timezone: str) -> list[date]:
     if rolling_days < 1:
         raise ValueError("--rolling-days must be at least 1")
 
-    today_local = datetime.now(ZoneInfo(timezone)).date()
+    today_local = local_today(timezone)
     return [today_local - timedelta(days=offset) for offset in range(rolling_days - 1, -1, -1)]
 
 
@@ -169,19 +170,16 @@ def _sync_one_date(
                 pin, "CumulativeOperatingHours", "cumulativeOperatingHours", start_utc, end_utc
             )
             operating_points = extract_metric_points(operating_response, "cumulativeOperatingHours")
-            time.sleep(AEMP_CALL_PAUSE_SECONDS)
 
             print(f"  [{machine_name}] pin={pin}: fetching CumulativeMovingHours...")
             moving_response = client.get_aemp_series(
                 pin, "CumulativeMovingHours", "cumulativeMovingHours", start_utc, end_utc
             )
             moving_points = extract_metric_points(moving_response, "cumulativeMovingHours")
-            time.sleep(AEMP_CALL_PAUSE_SECONDS)
 
             print(f"  [{machine_name}] pin={pin}: fetching Distance...")
             distance_response = client.get_aemp_series(pin, "Distance", "distance", start_utc, end_utc)
             distance_points = extract_metric_points(distance_response, "distance")
-            time.sleep(AEMP_CALL_PAUSE_SECONDS)
 
             metric_results_by_asset[asset_id] = {
                 "operating_points": operating_points,
@@ -207,6 +205,7 @@ def _sync_one_date(
         raise RuntimeError(f"Trackunit sync failed for report_date {report_date}: {error}") from error
 
 
+@provider_job_lock(TRACKUNIT_OVERLAP_GROUP)
 def run(
     date_arg: str | None = None,
     from_date_arg: str | None = None,
@@ -219,13 +218,15 @@ def run(
 
     Marks etl.sync_runs SUCCESS only if every report_date's AEMP calls
     succeeded and loaded cleanly. Any failure (any date, any asset, any
-    metric, including a 429) marks the whole run FAILED with the error in
-    error_message and re-raises -- there is no partial SUCCESS across a
-    multi-date backfill/rolling run.
+    metric -- including a 429 that exhausts its retries) marks the whole run
+    FAILED with the error in error_message and re-raises -- there is no
+    partial SUCCESS across a multi-date backfill/rolling run.
     """
+    configure_logging()
     print("Loading settings...")
     postgres_settings = get_settings()
     trackunit_settings = get_trackunit_settings()
+    ops_settings = get_etl_ops_settings()
 
     report_dates = resolve_report_dates(
         date_arg, from_date_arg, to_date_arg, rolling_days_arg, trackunit_settings.timezone
@@ -239,8 +240,8 @@ def run(
     sync_run_id = loader.start_sync_run(
         source_system=SOURCE_SYSTEM,
         job_name=JOB_NAME,
-        start_date=_to_date_key(min(report_dates)),
-        end_date=_to_date_key(max(report_dates)),
+        start_date=to_date_key(min(report_dates)),
+        end_date=to_date_key(max(report_dates)),
     )
     print(f"sync_run_id: {sync_run_id}")
 
@@ -271,6 +272,12 @@ def run(
             total_rows_fetched += rows_fetched
             total_rows_loaded += rows_loaded
 
+        loader.run_post_load_validation(
+            SOURCE_SYSTEM,
+            mode=ops_settings.validation_mode,
+            lookback_hours=ops_settings.validation_lookback_hours,
+        )
+
         loader.finish_sync_run(
             sync_run_id=sync_run_id,
             status="SUCCESS",
@@ -283,12 +290,8 @@ def run(
         )
 
     except Exception as error:
-        print(f"Sync run {sync_run_id} failed: {error}")
-        loader.finish_sync_run(
-            sync_run_id=sync_run_id,
-            status="FAILED",
-            error_message=str(error),
-        )
+        logger.exception("Trackunit sync run %s failed: %s", sync_run_id, error)
+        finish_sync_run_failed_safe(loader, sync_run_id, error)
         raise
 
 
@@ -304,7 +307,7 @@ def main() -> None:
             "  20-machine controlled run:\n"
             "    python -m jobs.sync_trackunit_daily_activity --date 2026-07-05 --limit 20\n"
             "\n"
-            "  Rolling scheduler run (hourly today, refresh yesterday for late-arriving data):\n"
+            "  Normal daily scheduler run (today plus yesterday for late-arriving data):\n"
             "    python -m jobs.sync_trackunit_daily_activity --rolling-days 2\n"
             "\n"
             "  7-day reconciliation:\n"

@@ -7,9 +7,15 @@ Manitou/manitou_trackunit_exploration.ipynb:
 - Work day hours: floor(last operating-hours boundary - first operating-hours
   boundary), to the minute.
 - Operating hours: CumulativeOperatingHours delta (last point - first point),
-  rounded to the minute.
-- Active driving: CumulativeMovingHours delta, rounded to the minute.
-- Distance: Distance.Odometer delta, where available.
+  rounded to the minute, or NULL if the cumulative counter decreases.
+- Active driving: CumulativeMovingHours delta, rounded to the minute, or NULL
+  if the cumulative counter decreases.
+- Distance: Distance.Odometer delta where available, or NULL if the
+  cumulative counter decreases.
+
+Any consecutive decrease in operating, moving, or distance readings marks
+the row COUNTER_RESET and nulls only that counter's derived metric. Raw
+readings and unaffected business metrics are preserved.
 
 It must not perform any I/O (no HTTP calls, no database access, no
 environment reads).
@@ -18,11 +24,16 @@ environment reads).
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, time, timedelta
+from datetime import date
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+from utils.dates import local_day_to_utc_window
+
+DATA_QUALITY_LIVE = "live"
+DATA_QUALITY_COUNTER_RESET = "COUNTER_RESET"
 
 RAW_ASSETS_COLUMNS = [
     "asset_id",
@@ -72,6 +83,8 @@ DAILY_ACTIVITY_COLUMNS = [
     "moving_points",
     "distance_points",
     "source_provider",
+    "counter_reset_detected",
+    "data_quality_status",
 ]
 
 _VALUE_COLUMN_CANDIDATES = ["Hour", "hour", "Odometer", "odometer", "value", "Value"]
@@ -84,14 +97,7 @@ def local_report_day_to_utc_window(report_date: date, timezone: str = "Africa/Ha
     Returns (start_utc, end_utc) as ISO-8601 UTC strings (e.g.
     "2026-06-30T22:00:00Z") suitable for the AEMP time-series endpoints.
     """
-    tz = ZoneInfo(timezone)
-    local_start = datetime.combine(report_date, time.min, tzinfo=tz)
-    local_end = local_start + timedelta(days=1)
-
-    start_utc = local_start.astimezone(ZoneInfo("UTC"))
-    end_utc = local_end.astimezone(ZoneInfo("UTC"))
-
-    return start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), end_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return local_day_to_utc_window(report_date, timezone)
 
 
 def minutes_to_hhmm(total_minutes: float | int | None, pad_hours: bool = True) -> str | None:
@@ -137,14 +143,46 @@ def detect_value_and_timestamp(df: pd.DataFrame) -> tuple[str | None, str | None
     return value_column, timestamp_column
 
 
+def cumulative_counter_reset_detected(points: list[dict]) -> bool:
+    """Return True when a cumulative metric decreases between readings.
+
+    Detection is chronological and checks every consecutive pair, rather
+    than only comparing the first and last values. This catches a reset that
+    later climbs above its pre-reset starting value. Duplicate timestamps are
+    collapsed (last value wins), matching the raw-table UPSERT grain.
+
+    Missing, malformed, and single-reading series are not resets.
+    """
+    if len(points) < 2:
+        return False
+
+    df = pd.json_normalize(points)
+    value_column, timestamp_column = detect_value_and_timestamp(df)
+    if value_column is None or timestamp_column is None:
+        return False
+
+    df[timestamp_column] = pd.to_datetime(df[timestamp_column], utc=True, errors="coerce")
+    df[value_column] = pd.to_numeric(df[value_column], errors="coerce")
+    df = (
+        df.dropna(subset=[timestamp_column, value_column])
+        .sort_values(timestamp_column)
+        .drop_duplicates(subset=[timestamp_column], keep="last")
+    )
+    if len(df) < 2:
+        return False
+
+    return bool(df[value_column].diff().lt(0).any())
+
+
 def cumulative_hours_delta_minutes(
     points: list[dict],
 ) -> tuple[float | None, pd.Timestamp | None, pd.Timestamp | None, int]:
     """Compute (delta_minutes, first_timestamp, last_timestamp, point_count) for an hours metric.
 
     `delta_minutes` is (last point's value - first point's value) * 60,
-    i.e. the raw hours delta converted to minutes. Returns Nones for the
-    value/timestamps if `points` is empty or the columns can't be detected.
+    i.e. the raw hours delta converted to minutes. It is None if any
+    consecutive reading decreases. Returns Nones for the value/timestamps if
+    `points` is empty or the columns can't be detected.
     """
     if not points:
         return None, None, None, 0
@@ -159,6 +197,8 @@ def cumulative_hours_delta_minutes(
 
     first_timestamp = df[timestamp_column].iloc[0]
     last_timestamp = df[timestamp_column].iloc[-1]
+    if cumulative_counter_reset_detected(points):
+        return None, first_timestamp, last_timestamp, len(df)
     delta_hours = df[value_column].iloc[-1] - df[value_column].iloc[0]
 
     return delta_hours * 60, first_timestamp, last_timestamp, len(df)
@@ -167,7 +207,7 @@ def cumulative_hours_delta_minutes(
 def cumulative_distance_delta_km(
     points: list[dict],
 ) -> tuple[float | None, pd.Timestamp | None, pd.Timestamp | None, int]:
-    """Compute (delta_km, first_timestamp, last_timestamp, point_count) for the distance metric."""
+    """Compute distance delta metadata, returning a NULL delta on a counter reset."""
     if not points:
         return None, None, None, 0
 
@@ -181,6 +221,8 @@ def cumulative_distance_delta_km(
 
     first_timestamp = df[timestamp_column].iloc[0]
     last_timestamp = df[timestamp_column].iloc[-1]
+    if cumulative_counter_reset_detected(points):
+        return None, first_timestamp, last_timestamp, len(df)
     delta_km = df[value_column].iloc[-1] - df[value_column].iloc[0]
 
     return delta_km, first_timestamp, last_timestamp, len(df)
@@ -316,7 +358,9 @@ def build_daily_activity_rows(
     valid zero row (work_day_minutes/operating_minutes/active_driving_minutes
     = 0, start/stop_time_utc = None) rather than treating it as a failure.
 
-    Returns a dict with: raw_assets_df, raw_operating_hours_df,
+    Counter decreases null only the affected derived value and set
+    counter_reset_detected/COUNTER_RESET on the daily row; raw points remain
+    present. Returns a dict with: raw_assets_df, raw_operating_hours_df,
     raw_moving_hours_df, raw_distance_df, dim_assets_df, daily_activity_df.
     """
     tz = ZoneInfo(timezone)
@@ -344,6 +388,13 @@ def build_daily_activity_rows(
         moving_points = metrics.get("moving_points") or []
         distance_points = metrics.get("distance_points") or []
 
+        operating_counter_reset = cumulative_counter_reset_detected(operating_points)
+        moving_counter_reset = cumulative_counter_reset_detected(moving_points)
+        distance_counter_reset = cumulative_counter_reset_detected(distance_points)
+        counter_reset_detected = (
+            operating_counter_reset or moving_counter_reset or distance_counter_reset
+        )
+
         raw_operating_rows.extend(_build_metric_rows(asset_id, operating_points, "CumulativeOperatingHours"))
         raw_moving_rows.extend(_build_metric_rows(asset_id, moving_points, "CumulativeMovingHours"))
         raw_distance_rows.extend(_build_metric_rows(asset_id, distance_points, "Distance"))
@@ -361,12 +412,20 @@ def build_daily_activity_rows(
             work_day_minutes = work_day_minutes if work_day_minutes is not None else 0
 
             operating_delta_minutes, _, _, _ = cumulative_hours_delta_minutes(operating_points)
-            operating_minutes = round(operating_delta_minutes) if operating_delta_minutes is not None else 0
+            if operating_counter_reset:
+                operating_minutes = None
+            else:
+                operating_minutes = round(operating_delta_minutes) if operating_delta_minutes is not None else 0
 
             moving_delta_minutes, _, _, _ = cumulative_hours_delta_minutes(moving_points)
-            active_driving_minutes = round(moving_delta_minutes) if moving_delta_minutes is not None else 0
+            if moving_counter_reset:
+                active_driving_minutes = None
+            else:
+                active_driving_minutes = round(moving_delta_minutes) if moving_delta_minutes is not None else 0
 
         distance_km, _, _, _ = cumulative_distance_delta_km(distance_points)
+        if distance_counter_reset:
+            distance_km = None
 
         start_time_local = start_time_utc.astimezone(tz).replace(tzinfo=None) if start_time_utc is not None else None
         stop_time_local = stop_time_utc.astimezone(tz).replace(tzinfo=None) if stop_time_utc is not None else None
@@ -396,6 +455,10 @@ def build_daily_activity_rows(
                 "moving_points": len(moving_points),
                 "distance_points": len(distance_points),
                 "source_provider": "trackunit",
+                "counter_reset_detected": counter_reset_detected,
+                "data_quality_status": (
+                    DATA_QUALITY_COUNTER_RESET if counter_reset_detected else DATA_QUALITY_LIVE
+                ),
             }
         )
 

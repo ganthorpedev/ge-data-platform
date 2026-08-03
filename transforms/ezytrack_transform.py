@@ -237,17 +237,19 @@ def _smoke_test() -> None:
     Not called on import -- only runs via `python -m transforms.ezytrack_transform`.
     Makes live API calls (via the connector) but never writes to PostgreSQL.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import timedelta
+
+    from utils.dates import format_utc_iso, utc_now
 
     from connectors.ezytrack_client import fetch_ezytrack_assets, fetch_ezytrack_trips
 
     assets_records = fetch_ezytrack_assets()
 
-    end_time = datetime.now(timezone.utc)
+    end_time = utc_now()
     start_time = end_time - timedelta(hours=1)
     trips_records = fetch_ezytrack_trips(
-        start_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        end_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        format_utc_iso(start_time),
+        format_utc_iso(end_time),
         page_size=50,
     )
 

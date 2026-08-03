@@ -168,15 +168,18 @@ SELECT
     COALESCE(loc.location_enrichment_status, 'NOT_YET_ENRICHED') AS location_enrichment_status,
     loc.location_enriched_at,
     'staging_live'::text AS reporting_source,
-    'live'::text AS data_quality_status,
-    da.loaded_at AS etl_last_updated
+    da.data_quality_status,
+    da.loaded_at AS etl_last_updated,
+    -- Appended after every pre-existing view column so downstream ordinal
+    -- consumers keep the same column order.
+    da.counter_reset_detected
 FROM staging.trackunit_daily_activity da
 LEFT JOIN staging.trackunit_dim_assets dim ON dim.asset_id = da.asset_id
 LEFT JOIN staging.trackunit_location_enrichment loc
     ON loc.report_date = da.report_date AND loc.asset_id = da.asset_id;
 
 COMMENT ON VIEW reporting.vw_trackunit_daily_activity IS
-    'Power BI: one row per Trackunit machine per local (Africa/Harare) report date, LEFT JOINed to staging.trackunit_location_enrichment (V1). zone_name_start/zone_name_stop and the location timestamp/lat/lon/altitude fields are real once the enrichment job has run for that report_date/asset_id; address/zip/city/country stay NULL -- no source field exists for them yet. location_enrichment_status = NOT_YET_ENRICHED means the enrichment job has not run for that row yet (distinct from the job''s own NOT_APPLICABLE_ZERO_ACTIVITY / ENRICHED / PARTIAL / NOT_FOUND outcomes).';
+    'Power BI: one row per Trackunit machine per local (Africa/Harare) report date, LEFT JOINed to staging.trackunit_location_enrichment (V1). zone_name_start/zone_name_stop and the location timestamp/lat/lon/altitude fields are real once the enrichment job has run for that report_date/asset_id; address/zip/city/country stay NULL -- no source field exists for them yet. location_enrichment_status = NOT_YET_ENRICHED means the enrichment job has not run for that row yet. data_quality_status/counter_reset_detected explicitly expose cumulative-counter resets; existing columns retain their prior names and order, with the reset flag appended.';
 
 -- -----------------------------------------------------------------------------
 -- 2.2 reporting.vw_sendem_trips_daily
@@ -778,7 +781,7 @@ SELECT
     ROUND(EXTRACT(EPOCH FROM (now() - ls.last_success_finished_at)) / 3600.0, 1) AS hours_since_success,
     CASE
         WHEN ls.last_success_finished_at IS NULL THEN 'never_succeeded'
-        WHEN lr.status = 'FAILED' THEN 'failing'
+        WHEN lr.status IN ('FAILED', 'ABANDONED') THEN 'failing'
         WHEN now() - ls.last_success_finished_at > INTERVAL '48 hours' THEN 'stale'
         WHEN now() - ls.last_success_finished_at > INTERVAL '6 hours' THEN 'aging'
         ELSE 'healthy'

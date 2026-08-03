@@ -55,16 +55,98 @@ FACT_EVENTS_COLUMNS = [
     "TotalEventDuration",
 ]
 
+ASSET_COLUMNS = [
+    "AssetId",
+    "SiteId",
+    "AssetType",
+    "Description",
+    "VinNumber",
+    "Country",
+    "GroupId",
+    "RegistrationNumber",
+    "IsAvailable",
+    "FleetNumber",
+    "Make",
+    "Model",
+    "FuelType",
+    "Year",
+]
+SITE_COLUMNS = ["SiteId", "SiteName"]
+EVENT_DESCRIPTION_COLUMNS = [
+    "EventTypeId",
+    "EventName",
+    "GroupId",
+    "MetricType",
+    "UnitType",
+    "EventCategory",
+]
+TRIP_COLUMNS = [
+    "DateKey",
+    "GroupId",
+    "SiteId",
+    "AssetId",
+    "TotalTripCount",
+    "TotalTripDistanceKilometres",
+    "TotalFuelUsedLitres",
+    "TotalEnergyUsedKwh",
+]
+EVENT_COLUMNS = [
+    "DateKey",
+    "GroupId",
+    "SiteId",
+    "AssetId",
+    "EventTypeId",
+    "TotalEventOccurrences",
+    "MinEventValue",
+    "MaxEventValue",
+    "TotalEventValue",
+    "MinEventDuration",
+    "MaxEventDuration",
+    "TotalEventDuration",
+]
 
-def to_dataframe(data: list | dict) -> pd.DataFrame:
+
+def to_dataframe(data: list | dict, expected_columns: list[str] | None = None) -> pd.DataFrame:
     """Normalize a raw JSON payload (list or dict) into a flat DataFrame.
 
-    Returns an empty DataFrame if `data` is empty.
+    Empty payloads retain `expected_columns`, which prevents downstream
+    merges and loaders from receiving a schema-less DataFrame. For non-empty
+    payloads, source columns not in the expected schema are preserved while
+    missing expected columns are added as nullable values.
     """
     if not data:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=expected_columns or [])
 
-    return pd.json_normalize(data)
+    frame = pd.json_normalize(data)
+    for column in expected_columns or []:
+        if column not in frame.columns:
+            frame[column] = pd.NA
+    return frame
+
+
+def _left_join_dimension(
+    facts_df: pd.DataFrame,
+    dimension_df: pd.DataFrame,
+    key: str,
+    suffix: str,
+) -> pd.DataFrame:
+    """Left-join a dimension without failing when that dimension is empty.
+
+    Avoiding pandas' merge for an empty right-hand frame also avoids dtype
+    mismatch errors between a populated numeric fact key and an empty
+    object-typed dimension key.
+    """
+    enriched = facts_df.copy()
+    if enriched.empty or dimension_df.empty or key not in dimension_df.columns:
+        for column in dimension_df.columns:
+            if column == key:
+                continue
+            output_column = column if column not in enriched.columns else f"{column}{suffix}"
+            if output_column not in enriched.columns:
+                enriched[output_column] = pd.NA
+        return enriched
+
+    return enriched.merge(dimension_df, on=key, how="left", suffixes=("", suffix))
 
 
 def add_date_column(df: pd.DataFrame, date_key_col: str = "DateKey") -> pd.DataFrame:
@@ -86,15 +168,14 @@ def enrich_trips(
     sites_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """Left-join trips onto assets and sites, and add a `date` column."""
-    enriched = trips_df.merge(assets_df, on="AssetId", how="left", suffixes=("", "_asset"))
-    enriched = enriched.merge(sites_df, on="SiteId", how="left", suffixes=("", "_site"))
+    enriched = _left_join_dimension(trips_df, assets_df, "AssetId", "_asset")
+    enriched = _left_join_dimension(enriched, sites_df, "SiteId", "_site")
     return add_date_column(enriched)
 
 
 def build_fact_trips(trips_enriched_df: pd.DataFrame) -> pd.DataFrame:
-    """Select the fact_trips columns that exist on the enriched trips DataFrame."""
-    existing_columns = [col for col in FACT_TRIPS_COLUMNS if col in trips_enriched_df.columns]
-    return trips_enriched_df[existing_columns].copy()
+    """Return the fact-trips schema, filling absent enrichment fields with nulls."""
+    return trips_enriched_df.reindex(columns=FACT_TRIPS_COLUMNS).copy()
 
 
 def enrich_events(
@@ -104,16 +185,15 @@ def enrich_events(
     event_desc_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """Left-join events onto assets, sites, and event descriptions, and add a `date` column."""
-    enriched = events_df.merge(assets_df, on="AssetId", how="left", suffixes=("", "_asset"))
-    enriched = enriched.merge(sites_df, on="SiteId", how="left", suffixes=("", "_site"))
-    enriched = enriched.merge(event_desc_df, on="EventTypeId", how="left", suffixes=("", "_event"))
+    enriched = _left_join_dimension(events_df, assets_df, "AssetId", "_asset")
+    enriched = _left_join_dimension(enriched, sites_df, "SiteId", "_site")
+    enriched = _left_join_dimension(enriched, event_desc_df, "EventTypeId", "_event")
     return add_date_column(enriched)
 
 
 def build_fact_events(events_enriched_df: pd.DataFrame) -> pd.DataFrame:
-    """Select the fact_events columns that exist on the enriched events DataFrame."""
-    existing_columns = [col for col in FACT_EVENTS_COLUMNS if col in events_enriched_df.columns]
-    return events_enriched_df[existing_columns].copy()
+    """Return the fact-events schema, filling absent enrichment fields with nulls."""
+    return events_enriched_df.reindex(columns=FACT_EVENTS_COLUMNS).copy()
 
 
 def build_dim_event_types(event_desc_df: pd.DataFrame, events_df: pd.DataFrame) -> pd.DataFrame:
@@ -158,16 +238,19 @@ def build_dim_event_types(event_desc_df: pd.DataFrame, events_df: pd.DataFrame) 
 def build_all(raw: dict[str, list]) -> dict[str, pd.DataFrame]:
     """Build every Sendem DataFrame from raw API payloads.
 
-    `raw` is expected to have the keys: assets, sites, people, organisations,
-    event_descriptions, trips, events.
+    `raw` is expected to have assets, sites, event_descriptions, trips, and
+    events. Legacy people/organisations values are still accepted in the
+    returned diagnostic frames, but the production job no longer fetches
+    those unused endpoints because neither the transforms nor load plan uses
+    them.
     """
-    assets_df = to_dataframe(raw.get("assets", []))
-    sites_df = to_dataframe(raw.get("sites", []))
+    assets_df = to_dataframe(raw.get("assets", []), ASSET_COLUMNS)
+    sites_df = to_dataframe(raw.get("sites", []), SITE_COLUMNS)
     people_df = to_dataframe(raw.get("people", []))
     organisations_df = to_dataframe(raw.get("organisations", []))
-    event_desc_df = to_dataframe(raw.get("event_descriptions", []))
-    trips_df = add_date_column(to_dataframe(raw.get("trips", [])))
-    events_df = add_date_column(to_dataframe(raw.get("events", [])))
+    event_desc_df = to_dataframe(raw.get("event_descriptions", []), EVENT_DESCRIPTION_COLUMNS)
+    trips_df = add_date_column(to_dataframe(raw.get("trips", []), TRIP_COLUMNS))
+    events_df = add_date_column(to_dataframe(raw.get("events", []), EVENT_COLUMNS))
 
     trips_enriched_df = enrich_trips(trips_df, assets_df, sites_df)
     events_enriched_df = enrich_events(events_df, assets_df, sites_df, event_desc_df)

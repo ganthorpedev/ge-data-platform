@@ -32,15 +32,15 @@ GROUP BY asset_id, metric_name, metric_timestamp_utc
 HAVING COUNT(*) > 1;
 
 -- =============================================================================
--- 3. Rows with negative minutes
+-- 3. Rows with negative cumulative-derived values
 --    Healthy result: 0 rows.
 -- =============================================================================
 
-SELECT report_date, asset_id, machine, work_day_minutes, operating_minutes, active_driving_minutes
+SELECT report_date, asset_id, machine, operating_minutes, active_driving_minutes, distance_km
 FROM staging.trackunit_daily_activity
-WHERE work_day_minutes < 0
-   OR operating_minutes < 0
-   OR active_driving_minutes < 0;
+WHERE operating_minutes < 0
+   OR active_driving_minutes < 0
+   OR distance_km < 0;
 
 -- =============================================================================
 -- 4. Rows with activity but null start/stop
@@ -131,3 +131,33 @@ SELECT
 FROM staging.trackunit_daily_activity
 WHERE report_date = '2026-07-01'
 ORDER BY machine;
+
+-- =============================================================================
+-- 11. Counter-reset quality consistency
+--     Healthy result: 0 rows. Reset rows must carry the explicit status, and
+--     normal rows must not claim COUNTER_RESET.
+-- =============================================================================
+
+SELECT report_date, asset_id, machine, counter_reset_detected, data_quality_status,
+       operating_minutes, active_driving_minutes, distance_km
+FROM staging.trackunit_daily_activity
+WHERE counter_reset_detected IS DISTINCT FROM (data_quality_status = 'COUNTER_RESET');
+
+-- =============================================================================
+-- 12. Counter-reset rows and reporting propagation
+--     Informational: inspect affected rows. Derived values may be NULL only
+--     for the specific counter(s) that reset; unaffected metrics stay valid.
+-- =============================================================================
+
+SELECT report_date, asset_id, machine, operating_minutes, active_driving_minutes,
+       distance_km, counter_reset_detected, data_quality_status, loaded_at
+FROM staging.trackunit_daily_activity
+WHERE counter_reset_detected
+ORDER BY report_date DESC, machine;
+
+SELECT activity_date, provider_asset_id, asset_name, operating_minutes,
+       active_driving_minutes, distance_km, counter_reset_detected,
+       data_quality_status, etl_last_updated
+FROM reporting.vw_trackunit_daily_activity
+WHERE counter_reset_detected
+ORDER BY activity_date DESC, asset_name;

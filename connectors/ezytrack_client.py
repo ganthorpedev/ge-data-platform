@@ -38,7 +38,8 @@ from typing import Any
 
 import requests
 
-from config.settings import EzytrackSettings, get_ezytrack_settings
+from config.settings import EzytrackSettings, get_ezytrack_settings, get_http_settings
+from utils.http import build_retrying_session
 
 ASSETS_QUERY = """
 query GetAssets($organisationId: Int!) {
@@ -169,6 +170,12 @@ class EzytrackClient:
         self._access_token: str | None = None
         self._token_type: str = "Bearer"
         self._expires_in: int | None = None
+        # Shared bounded transient-retry session (connection errors, timeouts,
+        # 500/502/503/504 only -- never a rate-limit or auth response). POST is
+        # explicitly allowed because these GraphQL POSTs are read-only queries,
+        # safe to repeat.
+        self._http_settings = get_http_settings()
+        self._session = build_retrying_session(self._http_settings, allowed_methods=("GET", "POST"))
 
     @property
     def token_type(self) -> str | None:
@@ -193,7 +200,7 @@ class EzytrackClient:
         only the non-secret token_type/expires_in fields are printed.
         """
         try:
-            response = requests.request(
+            response = self._session.request(
                 "GET",
                 self.settings.auth_url,
                 data={
@@ -201,7 +208,7 @@ class EzytrackClient:
                     "password": self.settings.password,
                     "grant_type": self.settings.grant_type,
                 },
-                timeout=30,
+                timeout=self._http_settings.timeout,
             )
         except requests.RequestException as error:
             raise RuntimeError(f"EzyTrack authentication request failed: {type(error).__name__}") from None
@@ -245,11 +252,11 @@ class EzytrackClient:
         GraphQL error or an auth failure that survives one retry, and
         `requests.HTTPError` for any other failed HTTP request.
         """
-        response = requests.post(
+        response = self._session.post(
             self.settings.graphql_url,
             headers=self._auth_headers(),
             json={"query": query, "variables": variables},
-            timeout=30,
+            timeout=self._http_settings.timeout,
         )
 
         if response.status_code == 401:
@@ -304,12 +311,33 @@ class EzytrackClient:
         already fetched) rather than returning partial data silently.
         Callers must not treat a partial fetch as success.
 
+        Cursor protection: a repeated `endCursor` or exceeding
+        `settings.max_pages` pages (default 500) raises a loud RuntimeError
+        instead of looping forever on a misbehaving API.
+
         Returns the raw `trips.nodes` records exactly as returned by the API.
         """
+        if page_size < 1:
+            raise ValueError(f"EzyTrack page_size must be at least 1, got {page_size}")
+        if self.settings.max_pages < 1:
+            raise ValueError(
+                f"EzyTrack max_pages must be at least 1, got {self.settings.max_pages}"
+            )
+
         all_trips: list[dict[str, Any]] = []
         after: str | None = None
+        seen_cursors: set[str] = set()
+        pages_fetched = 0
 
         while True:
+            if pages_fetched >= self.settings.max_pages:
+                raise RuntimeError(
+                    f"EzyTrack trips pagination exceeded max_pages={self.settings.max_pages} "
+                    f"for window {start_time_utc} to {end_time_utc} "
+                    f"({len(all_trips)} record(s) fetched so far). Refusing to loop further -- "
+                    "raise EZYTRACK_MAX_PAGES only if this window genuinely has more pages."
+                )
+
             variables = {
                 "organisationId": self.settings.organisation_id,
                 "startDateUtc": start_time_utc,
@@ -329,14 +357,33 @@ class EzytrackClient:
                     records_fetched=len(all_trips),
                 ) from error
 
+            pages_fetched += 1
             page = result["data"]["trips"]
             nodes = page["nodes"] or []
             all_trips.extend(nodes)
             print(f"Fetched {len(nodes)} trip(s). Total so far: {len(all_trips)}")
 
-            if not page["pageInfo"]["hasNextPage"]:
+            page_info = page["pageInfo"]
+            end_cursor = page_info.get("endCursor")
+            if end_cursor is not None and end_cursor in seen_cursors:
+                raise RuntimeError(
+                    f"EzyTrack trips pagination returned a repeated endCursor "
+                    f"({end_cursor!r}) for window {start_time_utc} to {end_time_utc} after "
+                    f"{pages_fetched} page(s) -- aborting instead of looping forever."
+                )
+            if end_cursor is not None:
+                seen_cursors.add(end_cursor)
+
+            if not page_info["hasNextPage"]:
                 break
-            after = page["pageInfo"]["endCursor"]
+
+            if not end_cursor:
+                raise RuntimeError(
+                    f"EzyTrack trips pagination returned a null or empty endCursor while "
+                    f"hasNextPage=true for window {start_time_utc} to {end_time_utc} after "
+                    f"{pages_fetched} page(s) -- aborting instead of looping forever."
+                )
+            after = end_cursor
 
         return all_trips
 

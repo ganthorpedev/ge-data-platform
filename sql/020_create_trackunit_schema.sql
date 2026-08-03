@@ -141,6 +141,23 @@ CREATE TABLE IF NOT EXISTS staging.trackunit_daily_activity (
     moving_points INTEGER,
     distance_points INTEGER,
     source_provider TEXT DEFAULT 'trackunit',
+    counter_reset_detected BOOLEAN NOT NULL DEFAULT FALSE,
+    data_quality_status TEXT NOT NULL DEFAULT 'live',
     loaded_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT trackunit_daily_activity_nonnegative_counters CHECK (
+        (operating_minutes IS NULL OR operating_minutes >= 0)
+        AND (active_driving_minutes IS NULL OR active_driving_minutes >= 0)
+        AND (distance_km IS NULL OR distance_km >= 0)
+    ),
     PRIMARY KEY (report_date, asset_id)
 );
+
+-- CREATE TABLE IF NOT EXISTS does not evolve an already-existing production
+-- table. Keep this canonical schema script independently rerunnable so the
+-- reporting-view script (022) can safely reference the new quality fields
+-- before the historical backfill/constraint migration (027) is applied.
+ALTER TABLE staging.trackunit_daily_activity
+    ADD COLUMN IF NOT EXISTS counter_reset_detected BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE staging.trackunit_daily_activity
+    ADD COLUMN IF NOT EXISTS data_quality_status TEXT NOT NULL DEFAULT 'live';

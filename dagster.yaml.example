@@ -1,0 +1,29 @@
+# Merge these keys into %DAGSTER_HOME%\dagster.yaml on the production host.
+# This repository example is not read automatically and intentionally does
+# not overwrite the SYSTEM account's existing Dagster storage/run-launcher
+# configuration.
+
+# Dagster 1.13.14 run-monitoring keys.  The combined Trackunit daily refresh
+# shares one six-hour timeout budget across its two sequential subprocesses;
+# the seven-hour global ceiling leaves time for graceful termination and
+# Dagster bookkeeping.
+run_monitoring:
+  enabled: true
+  start_timeout_seconds: 300
+  cancel_timeout_seconds: 300
+  max_runtime_seconds: 25200
+  max_resume_run_attempts: 0
+  poll_interval_seconds: 60
+  cancellation_thread_poll_interval_seconds: 10
+  free_slots_after_run_end_seconds: 0
+
+# Every Trackunit job carries telemetry/provider=trackunit.  This run-level
+# limit prevents scheduled and manually launched Dagster runs from
+# overlapping; schedule guards and the OS provider lock remain defense in
+# depth.
+concurrency:
+  runs:
+    tag_concurrency_limits:
+      - key: telemetry/provider
+        value: trackunit
+        limit: 1

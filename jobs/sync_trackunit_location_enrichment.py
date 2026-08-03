@@ -27,30 +27,29 @@ Address/zip/city/country are never populated -- see
 transforms/trackunit_location_transform.py's module docstring. Do not add
 reverse geocoding here.
 
-API safety: one AEMP/Site call at a time, 1-second pause between calls, no
-retry loops. A site name is only resolved once per run per distinct site id
-(cached), not once per asset. A site-detail 403 (this account cannot see
-that specific site) is non-fatal: it is logged, the denied site_id is
-cached so it is never requested again this run, and the affected asset's
-row is marked PARTIAL/SITE_ACCESS_DENIED instead of aborting the sync. All
-other failures (auth-wide 401, database errors, invalid responses,
-exhausted 429/5xx retries) still stop the whole run and mark etl.sync_runs
-FAILED.
+API safety: one AEMP/Site call at a time, with configurable AEMP pacing and
+bounded retries handled by connectors.trackunit_client. A site name is only
+resolved once per run per distinct site id (cached), not once per asset. A
+site-detail 403 (this account cannot see that specific site) is non-fatal:
+it is logged, the denied site_id is cached so it is never requested again
+this run, and the affected asset's row is marked PARTIAL/SITE_ACCESS_DENIED
+instead of aborting the sync. All other failures (auth-wide 401, database
+errors, invalid responses, exhausted 429/5xx retries) still stop the whole
+run and mark etl.sync_runs FAILED.
 """
 
 from __future__ import annotations
 
 import argparse
-import time
+import logging
 from datetime import date, datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from config.settings import get_settings, get_trackunit_settings
 from connectors.trackunit_client import TrackunitClient, TrackunitSiteAccessDeniedError
-from loaders.postgres_loader import PostgresLoader
+from loaders.postgres_loader import PostgresLoader, finish_sync_run_failed_safe
 from transforms.trackunit_location_transform import (
     ENRICHMENT_COLUMNS,
     RAW_LOCATION_COLUMNS,
@@ -68,6 +67,9 @@ from transforms.trackunit_location_transform import (
     find_active_site_id,
     latest_point_at_or_before,
 )
+from utils.dates import format_utc_iso, local_today, to_date_key
+from utils.logging_config import configure_logging
+from utils.overlap_lock import TRACKUNIT_OVERLAP_GROUP, provider_job_lock
 
 # Sentinel stored in site_cache for a site_id that returned 403 -- lets us
 # skip re-requesting it for the rest of the run without treating it the same
@@ -77,27 +79,19 @@ _SITE_ACCESS_DENIED = object()
 SOURCE_SYSTEM = "trackunit_location"
 JOB_NAME = "trackunit_location_enrichment_sync"
 
-API_CALL_PAUSE_SECONDS = 1
 LOOKBACK_HOURS = 48
 
-
-def _to_date_key(value: date) -> int:
-    """Convert a date to its YYYYMMDD integer representation (etl.sync_runs convention)."""
-    return int(value.strftime("%Y%m%d"))
+logger = logging.getLogger(__name__)
 
 
 def _default_report_date(timezone_name: str) -> date:
     """Return yesterday's date in `timezone_name` (matches the metric job's own default)."""
-    now_local = datetime.now(ZoneInfo(timezone_name))
-    return (now_local - timedelta(days=1)).date()
+    return local_today(timezone_name) - timedelta(days=1)
 
 
 def _fmt_utc(dt) -> str:
     """Format a (possibly non-UTC tz-aware) datetime as an AEMP-style UTC ISO-8601 string."""
-    ts = pd.Timestamp(dt)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
-    return ts.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
+    return format_utc_iso(dt)
 
 
 def _fetch_activity_rows(loader: PostgresLoader, report_date: date, machines: list[str] | None, limit: int | None) -> list[dict[str, Any]]:
@@ -159,12 +153,10 @@ def _enrich_one_asset(
     print(f"  [{row['machine']}] fetching AEMP Locations (start boundary window)...")
     start_aemp = client.get_aemp_series(pin, "Locations", "location", start_window_start, start_window_end, page=1)
     start_points = extract_location_points(start_aemp)
-    time.sleep(API_CALL_PAUSE_SECONDS)
 
     print(f"  [{row['machine']}] fetching AEMP Locations (stop boundary window)...")
     stop_aemp = client.get_aemp_series(pin, "Locations", "location", stop_window_start, stop_window_end, page=1)
     stop_points = extract_location_points(stop_aemp)
-    time.sleep(API_CALL_PAUSE_SECONDS)
 
     start_point = latest_point_at_or_before(start_points, start_utc)
     stop_point = latest_point_at_or_before(stop_points, stop_utc)
@@ -172,7 +164,6 @@ def _enrich_one_asset(
     print(f"  [{row['machine']}] fetching Site History...")
     site_history_response = client.get_site_history(asset_id, start_window_start, stop_window_end)
     site_history_intervals = site_history_response.get("content", [])
-    time.sleep(API_CALL_PAUSE_SECONDS)
 
     start_site_id = find_active_site_id(site_history_intervals, start_utc)
     stop_site_id = find_active_site_id(site_history_intervals, stop_utc)
@@ -193,7 +184,6 @@ def _enrich_one_asset(
             continue
         site_cache[site_id] = site_detail
         raw_site_rows.append(build_raw_site_row(site_id, site_detail))
-        time.sleep(API_CALL_PAUSE_SECONDS)
 
     def _zone_name(site_id: str | None) -> str | None:
         if site_id is None:
@@ -236,8 +226,10 @@ def _enrich_one_asset(
     return enrichment_row, raw_location_rows, raw_site_history_rows, raw_site_rows
 
 
+@provider_job_lock(TRACKUNIT_OVERLAP_GROUP)
 def run(report_date: date, machines: list[str] | None = None, limit: int | None = None) -> None:
     """Execute one Trackunit location-enrichment run for `report_date`."""
+    configure_logging()
     print("Loading settings...")
     postgres_settings = get_settings()
     trackunit_settings = get_trackunit_settings()
@@ -251,8 +243,8 @@ def run(report_date: date, machines: list[str] | None = None, limit: int | None 
     sync_run_id = loader.start_sync_run(
         source_system=SOURCE_SYSTEM,
         job_name=JOB_NAME,
-        start_date=_to_date_key(report_date),
-        end_date=_to_date_key(report_date),
+        start_date=to_date_key(report_date),
+        end_date=to_date_key(report_date),
     )
     print(f"sync_run_id: {sync_run_id}")
 
@@ -329,8 +321,8 @@ def run(report_date: date, machines: list[str] | None = None, limit: int | None 
         print(f"Sync run {sync_run_id} completed: SUCCESS (fetched={rows_fetched}, loaded={rows_loaded})")
 
     except Exception as error:
-        print(f"Sync run {sync_run_id} failed: {error}")
-        loader.finish_sync_run(sync_run_id=sync_run_id, status="FAILED", error_message=str(error))
+        logger.exception("Trackunit location sync run %s failed: %s", sync_run_id, error)
+        finish_sync_run_failed_safe(loader, sync_run_id, error)
         raise
 
 

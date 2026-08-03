@@ -1,88 +1,79 @@
-"""Cron schedules for the telemetry ETL jobs defined in orchestration/definitions.py.
+"""Cron schedules and schedule-time overlap protection.
 
-Every schedule here is created with default_status=STOPPED -- they must be
-turned on manually in the Dagster UI (Automation tab) after review. This is
-intentional: do not flip any of these to RUNNING as part of a code change.
+Provider schedules keep ``default_status=STOPPED`` to preserve this project's
+deployment convention: each must be reviewed and enabled in the Dagster UI.
+The two operational sensors have their own explicit status in
+``orchestration.monitoring``.
 
-Overlap protection: each schedule's evaluation function checks the Dagster
-instance for runs of the relevant job(s) already in QUEUED, STARTING,
-STARTED, or CANCELING before requesting a new run, and returns a SkipReason
-(logged by Dagster) instead of a RunRequest when one is found. This is a
-simple in-instance check, not a distributed lock -- it is sufficient here
-because these jobs are all launched by the same Dagster instance/daemon.
-
-trackunit_3_hour_refresh and trackunit_rolling_7_days both touch
-staging.trackunit_daily_activity, so they additionally guard against each
-other (not just against themselves) to avoid a concurrent write conflict.
+Every provider schedule checks all Dagster jobs in its overlap group, not
+only its own job.  The OS lock in ``orchestration.runner`` and the optional
+Dagster run-tag concurrency rule in ``dagster.yaml.example`` close the race
+after schedule evaluation and protect manual launches too.
 """
 
-from __future__ import annotations
+from collections.abc import Sequence
 
 import dagster as dg
 
 from orchestration.definitions import (
+    ezytrack_daily_reconciliation,
     ezytrack_sync,
     sendem_sync,
-    trackunit_3_hour_refresh,
+    stale_started_run_cleanup,
+    trackunit_daily_refresh,
     trackunit_rolling_7_days,
 )
+from orchestration.overlap import (
+    EZYTRACK_DAGSTER_JOB_NAMES,
+    HOUSEKEEPING_DAGSTER_JOB_NAMES,
+    SENDEM_DAGSTER_JOB_NAMES,
+    TRACKUNIT_DAGSTER_JOB_NAMES,
+    find_active_run_job,
+)
+
 
 TIMEZONE = "Africa/Harare"
-
-_ACTIVE_RUN_STATUSES = [
-    dg.DagsterRunStatus.QUEUED,
-    dg.DagsterRunStatus.STARTING,
-    dg.DagsterRunStatus.STARTED,
-    dg.DagsterRunStatus.CANCELING,
-]
-
-
-def _find_active_run_job(instance: dg.DagsterInstance, job_names: list[str]) -> str | None:
-    """Return the first job name in job_names with an active run, or None."""
-    for job_name in job_names:
-        runs = instance.get_runs(
-            filters=dg.RunsFilter(job_name=job_name, statuses=_ACTIVE_RUN_STATUSES),
-            limit=1,
-        )
-        if runs:
-            return job_name
-    return None
 
 
 def _skip_if_overlapping(
     context: dg.ScheduleEvaluationContext,
     job_name: str,
-    overlap_with: list[str],
+    overlap_with: Sequence[str],
+    *,
+    run_tags: dict[str, str] | None = None,
 ) -> dg.SkipReason | dg.RunRequest:
-    """Shared overlap-protection logic for every schedule below.
-
-    `overlap_with` is the full set of job names (including `job_name` itself)
-    that must have no active run before this schedule is allowed to launch.
-    """
-    blocking_job = _find_active_run_job(context.instance, overlap_with)
+    """Skip when any non-terminal run exists in the supplied overlap group."""
+    blocking_job = find_active_run_job(context.instance, overlap_with)
     if blocking_job is not None:
         reason = (
-            f"Skipping scheduled launch of '{job_name}': job '{blocking_job}' already has a "
-            "run in QUEUED, STARTING, STARTED, or CANCELING."
+            f"Skipping scheduled launch of {job_name!r}: {blocking_job!r} already has "
+            "a run in a non-terminal Dagster status."
         )
         context.log.warning(reason)
         return dg.SkipReason(reason)
 
-    return dg.RunRequest(run_key=context.scheduled_execution_time.isoformat())
+    scheduled_time = context.scheduled_execution_time
+    return dg.RunRequest(
+        run_key=scheduled_time.isoformat() if scheduled_time is not None else None,
+        tags=run_tags,
+    )
 
 
 @dg.schedule(
-    job=trackunit_3_hour_refresh,
-    cron_schedule="5 */3 * * *",
+    job=trackunit_daily_refresh,
+    cron_schedule="5 2 * * *",
     execution_timezone=TIMEZONE,
     default_status=dg.DefaultScheduleStatus.STOPPED,
 )
-def trackunit_3_hour_refresh_schedule(context: dg.ScheduleEvaluationContext) -> dg.SkipReason | dg.RunRequest:
-    """Rolling 2-day activity refresh, then location enrichment, every 3 hours."""
+def trackunit_daily_refresh_schedule(
+    context: dg.ScheduleEvaluationContext,
+) -> dg.SkipReason | dg.RunRequest:
+    """Daily rolling two-day activity refresh followed by enrichment."""
     return _skip_if_overlapping(
         context,
-        job_name="trackunit_3_hour_refresh",
-        overlap_with=["trackunit_3_hour_refresh", "trackunit_rolling_7_days"],
+        job_name="trackunit_daily_refresh",
+        overlap_with=TRACKUNIT_DAGSTER_JOB_NAMES,
+        run_tags={"telemetry/provider": "trackunit"},
     )
 
 
@@ -92,8 +83,16 @@ def trackunit_3_hour_refresh_schedule(context: dg.ScheduleEvaluationContext) -> 
     execution_timezone=TIMEZONE,
     default_status=dg.DefaultScheduleStatus.STOPPED,
 )
-def sendem_sync_schedule(context: dg.ScheduleEvaluationContext) -> dg.SkipReason | dg.RunRequest:
-    return _skip_if_overlapping(context, job_name="sendem_sync", overlap_with=["sendem_sync"])
+def sendem_sync_schedule(
+    context: dg.ScheduleEvaluationContext,
+) -> dg.SkipReason | dg.RunRequest:
+    """Existing three-hour Sendem schedule (unchanged)."""
+    return _skip_if_overlapping(
+        context,
+        job_name="sendem_sync",
+        overlap_with=SENDEM_DAGSTER_JOB_NAMES,
+        run_tags={"telemetry/provider": "sendem"},
+    )
 
 
 @dg.schedule(
@@ -102,31 +101,76 @@ def sendem_sync_schedule(context: dg.ScheduleEvaluationContext) -> dg.SkipReason
     execution_timezone=TIMEZONE,
     default_status=dg.DefaultScheduleStatus.STOPPED,
 )
-def ezytrack_sync_schedule(context: dg.ScheduleEvaluationContext) -> dg.SkipReason | dg.RunRequest:
-    # No retry policy attached here on purpose: a rate-limit (429) failure
-    # should fail this run clearly and wait for the next scheduled launch,
-    # not retry within the run.
-    return _skip_if_overlapping(context, job_name="ezytrack_sync", overlap_with=["ezytrack_sync"])
+def ezytrack_sync_schedule(
+    context: dg.ScheduleEvaluationContext,
+) -> dg.SkipReason | dg.RunRequest:
+    """Existing three-hour EzyTrack incremental/catch-up schedule."""
+    return _skip_if_overlapping(
+        context,
+        job_name="ezytrack_sync",
+        overlap_with=EZYTRACK_DAGSTER_JOB_NAMES,
+        run_tags={"telemetry/provider": "ezytrack"},
+    )
+
+
+@dg.schedule(
+    job=ezytrack_daily_reconciliation,
+    cron_schedule="15 1 * * *",
+    execution_timezone=TIMEZONE,
+    default_status=dg.DefaultScheduleStatus.STOPPED,
+)
+def ezytrack_daily_reconciliation_schedule(
+    context: dg.ScheduleEvaluationContext,
+) -> dg.SkipReason | dg.RunRequest:
+    """Daily long-lookback reconciliation using ``--reconcile``."""
+    return _skip_if_overlapping(
+        context,
+        job_name="ezytrack_daily_reconciliation",
+        overlap_with=EZYTRACK_DAGSTER_JOB_NAMES,
+        run_tags={"telemetry/provider": "ezytrack"},
+    )
 
 
 @dg.schedule(
     job=trackunit_rolling_7_days,
-    cron_schedule="45 1 * * *",
+    cron_schedule="45 1 * * 0",
     execution_timezone=TIMEZONE,
     default_status=dg.DefaultScheduleStatus.STOPPED,
 )
-def trackunit_rolling_7_days_schedule(context: dg.ScheduleEvaluationContext) -> dg.SkipReason | dg.RunRequest:
-    """Daily reconciliation/backfill run."""
+def trackunit_rolling_7_days_schedule(
+    context: dg.ScheduleEvaluationContext,
+) -> dg.SkipReason | dg.RunRequest:
+    """Weekly rolling seven-day Trackunit reconciliation (Sunday)."""
     return _skip_if_overlapping(
         context,
         job_name="trackunit_rolling_7_days",
-        overlap_with=["trackunit_rolling_7_days", "trackunit_3_hour_refresh"],
+        overlap_with=TRACKUNIT_DAGSTER_JOB_NAMES,
+        run_tags={"telemetry/provider": "trackunit"},
+    )
+
+
+@dg.schedule(
+    job=stale_started_run_cleanup,
+    cron_schedule="20 * * * *",
+    execution_timezone=TIMEZONE,
+    default_status=dg.DefaultScheduleStatus.STOPPED,
+)
+def stale_started_run_cleanup_schedule(
+    context: dg.ScheduleEvaluationContext,
+) -> dg.SkipReason | dg.RunRequest:
+    """Hourly conservative STARTED-to-ABANDONED housekeeping."""
+    return _skip_if_overlapping(
+        context,
+        job_name="stale_started_run_cleanup",
+        overlap_with=HOUSEKEEPING_DAGSTER_JOB_NAMES,
     )
 
 
 schedules = [
-    trackunit_3_hour_refresh_schedule,
+    trackunit_daily_refresh_schedule,
     sendem_sync_schedule,
     ezytrack_sync_schedule,
+    ezytrack_daily_reconciliation_schedule,
     trackunit_rolling_7_days_schedule,
+    stale_started_run_cleanup_schedule,
 ]

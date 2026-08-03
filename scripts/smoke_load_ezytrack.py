@@ -17,20 +17,21 @@ This is a smoke test only, NOT the production sync job:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from config.settings import get_settings
 from connectors.ezytrack_client import fetch_ezytrack_assets, fetch_ezytrack_trips
 from loaders.postgres_loader import PostgresLoader
 from transforms.ezytrack_transform import build_all
+from utils.dates import format_utc_iso, utc_now
 
 
 def run() -> None:
     """Fetch, transform, and load one tiny EzyTrack window; print results only."""
-    end_time = datetime.now(timezone.utc)
+    end_time = utc_now()
     start_time = end_time - timedelta(hours=1)
-    start_str = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-    end_str = end_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    start_str = format_utc_iso(start_time)
+    end_str = format_utc_iso(end_time)
 
     print("Fetching EzyTrack assets...")
     assets = fetch_ezytrack_assets()

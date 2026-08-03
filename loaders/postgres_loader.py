@@ -8,8 +8,10 @@ etl.sync_runs / etl.sync_table_loads tracking.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus
 
 import pandas as pd
@@ -17,6 +19,136 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from config.settings import Settings
+from utils.dates import utc_now
+
+logger = logging.getLogger(__name__)
+
+# to_sql chunk size for the temp-table stage of every upsert. The widest
+# tables here have ~30 columns; 500 rows x 30 columns = 15,000 bound
+# parameters per INSERT, comfortably under psycopg2/PostgreSQL's 65,535
+# parameter limit while still batching far better than row-by-row inserts.
+TO_SQL_CHUNKSIZE = 500
+
+# These checks are deliberately the bounded, post-load subset of the existing
+# sql/*validate*.sql packs. The full packs remain available for manual
+# reconciliation; running their full-history joins after every small sync
+# would be unnecessarily expensive. Every query below only inspects rows
+# touched recently via loaded_at.
+POST_LOAD_VALIDATION_QUERIES: dict[str, list[tuple[str, str, bool]]] = {
+    "sendem": [
+        (
+            "recent negative trip metrics",
+            """
+            SELECT COUNT(*)
+            FROM staging.sendem_fact_trips_daily
+            WHERE loaded_at >= CURRENT_TIMESTAMP - make_interval(hours => :lookback_hours)
+              AND (
+                    total_trip_count < 0
+                 OR total_trip_distance_kilometres < 0
+                 OR total_fuel_used_litres < 0
+                 OR total_energy_used_kwh < 0
+              )
+            """,
+            True,
+        ),
+        (
+            "recent negative event counts or durations",
+            """
+            SELECT COUNT(*)
+            FROM staging.sendem_fact_events_daily
+            WHERE loaded_at >= CURRENT_TIMESTAMP - make_interval(hours => :lookback_hours)
+              AND (
+                    total_event_occurrences < 0
+                 OR min_event_duration < 0
+                 OR max_event_duration < 0
+                 OR total_event_duration < 0
+              )
+            """,
+            True,
+        ),
+        (
+            "recent facts missing an asset or site dimension",
+            """
+            SELECT COUNT(*)
+            FROM (
+                SELECT f.date_key, f.group_id, f.site_id, f.asset_id
+                FROM staging.sendem_fact_trips_daily f
+                LEFT JOIN staging.sendem_dim_assets a ON a.asset_id = f.asset_id
+                LEFT JOIN staging.sendem_dim_sites s ON s.site_id = f.site_id
+                WHERE f.loaded_at >= CURRENT_TIMESTAMP - make_interval(hours => :lookback_hours)
+                  AND (a.asset_id IS NULL OR s.site_id IS NULL)
+                UNION ALL
+                SELECT f.date_key, f.group_id, f.site_id, f.asset_id
+                FROM staging.sendem_fact_events_daily f
+                LEFT JOIN staging.sendem_dim_assets a ON a.asset_id = f.asset_id
+                LEFT JOIN staging.sendem_dim_sites s ON s.site_id = f.site_id
+                WHERE f.loaded_at >= CURRENT_TIMESTAMP - make_interval(hours => :lookback_hours)
+                  AND (a.asset_id IS NULL OR s.site_id IS NULL)
+            ) AS missing_dimensions
+            """,
+            False,
+        ),
+    ],
+    "ezytrack": [
+        (
+            "recent negative trip metrics",
+            """
+            SELECT COUNT(*)
+            FROM staging.ezytrack_fact_trips
+            WHERE loaded_at >= CURRENT_TIMESTAMP - make_interval(hours => :lookback_hours)
+              AND (
+                    duration_seconds < 0
+                 OR distance_meters < 0
+                 OR distance_km < 0
+                 OR stop_time_seconds < 0
+                 OR idle_time_seconds < 0
+                 OR time_in_motion_seconds < 0
+              )
+            """,
+            True,
+        ),
+        (
+            "recent trips missing an asset dimension",
+            """
+            SELECT COUNT(*)
+            FROM staging.ezytrack_fact_trips f
+            LEFT JOIN staging.ezytrack_dim_assets a ON a.asset_id = f.asset_id
+            WHERE f.loaded_at >= CURRENT_TIMESTAMP - make_interval(hours => :lookback_hours)
+              AND a.asset_id IS NULL
+            """,
+            False,
+        ),
+    ],
+    "trackunit": [
+        (
+            "recent negative daily activity metrics",
+            """
+            SELECT COUNT(*)
+            FROM staging.trackunit_daily_activity
+            WHERE loaded_at >= CURRENT_TIMESTAMP - make_interval(hours => :lookback_hours)
+              AND (
+                    work_day_minutes < 0
+                 OR operating_minutes < 0
+                 OR active_driving_minutes < 0
+                 OR distance_km < 0
+              )
+            """,
+            True,
+        ),
+        (
+            "recent counter-reset quality flag/status mismatches",
+            """
+            SELECT COUNT(*)
+            FROM staging.trackunit_daily_activity
+            WHERE loaded_at >= CURRENT_TIMESTAMP - make_interval(hours => :lookback_hours)
+              AND counter_reset_detected IS DISTINCT FROM
+                  (data_quality_status = 'COUNTER_RESET')
+            """,
+            True,
+        ),
+    ],
+    "trackunit_location": [],
+}
 
 
 def to_snake_case(name: str) -> str:
@@ -26,17 +158,62 @@ def to_snake_case(name: str) -> str:
     return step2.lower()
 
 
+def prepare_dataframe_for_load(df: pd.DataFrame) -> pd.DataFrame:
+    """Snake-case columns, null-normalise, and stamp a UTC `loaded_at`.
+
+    `loaded_at` is always timezone-aware UTC (never the machine-local naive
+    clock) so TIMESTAMPTZ columns store an unambiguous instant regardless of
+    the Windows box's timezone setting.
+    """
+    prepared = df.rename(columns={col: to_snake_case(col) for col in df.columns})
+    prepared = prepared.where(pd.notnull(prepared), None)
+    if "loaded_at" not in prepared.columns:
+        prepared["loaded_at"] = pd.Timestamp.now(tz="UTC")
+    return prepared
+
+
+def finish_sync_run_failed_safe(loader: "PostgresLoader", sync_run_id: str, error: BaseException) -> None:
+    """Mark a sync run FAILED without ever masking the original job error.
+
+    If the FAILED bookkeeping update itself fails (e.g. the database is the
+    thing that broke), the bookkeeping error is logged and swallowed so the
+    caller's `raise` re-raises the ORIGINAL exception, and the sync_runs row
+    is left in STARTED for the housekeeping job to mark ABANDONED later.
+    """
+    try:
+        loader.finish_sync_run(sync_run_id=sync_run_id, status="FAILED", error_message=str(error))
+    except Exception as bookkeeping_error:
+        logger.error(
+            "Could not mark sync run %s as FAILED (bookkeeping error: %s). "
+            "The original job error is preserved and re-raised; this run will "
+            "be picked up by stale-run cleanup as ABANDONED.",
+            sync_run_id,
+            bookkeeping_error,
+        )
+
+
 class PostgresLoader:
     """Loads Sendem dataframes into the telemetry_warehouse PostgreSQL database."""
 
     def __init__(self, settings: Settings) -> None:
-        """Create and store a SQLAlchemy engine from `settings`."""
+        """Create and store a SQLAlchemy engine from `settings`.
+
+        pool_pre_ping revalidates pooled connections before use (the
+        Trackunit job can spend hours fetching before it writes, easily
+        outliving an idle connection); pool_recycle=1800 proactively replaces
+        connections older than 30 minutes.
+        """
         password = quote_plus(settings.postgres_password)
         connection_string = (
             f"postgresql+psycopg2://{settings.postgres_user}:{password}"
             f"@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}"
         )
-        self.engine: Engine = create_engine(connection_string)
+        self.engine: Engine = create_engine(
+            connection_string,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            pool_timeout=settings.postgres_pool_timeout_seconds,
+        )
 
     def test_connection(self) -> None:
         """Run a trivial query and print the connected database and user."""
@@ -78,10 +255,7 @@ class PostgresLoader:
             print(f"No rows to load into {schema}.{table}")
             return 0
 
-        prepared = df.rename(columns={col: to_snake_case(col) for col in df.columns})
-        prepared = prepared.where(pd.notnull(prepared), None)
-        if "loaded_at" not in prepared.columns:
-            prepared["loaded_at"] = pd.Timestamp.now()
+        prepared = prepare_dataframe_for_load(df)
 
         destination_columns = self.get_table_columns(schema, table)
         original_columns = list(prepared.columns)
@@ -125,7 +299,17 @@ class PostgresLoader:
             conn.execute(
                 text(f"CREATE TEMP TABLE {temp_table} AS SELECT {column_list_sql} FROM {schema}.{table} WHERE FALSE")
             )
-            prepared.to_sql(temp_table, con=conn, if_exists="append", index=False)
+            # method="multi" batches many rows per INSERT statement; see
+            # TO_SQL_CHUNKSIZE for why 500. UPSERT semantics are untouched --
+            # this only speeds up the temp-table staging step.
+            prepared.to_sql(
+                temp_table,
+                con=conn,
+                if_exists="append",
+                index=False,
+                method="multi",
+                chunksize=TO_SQL_CHUNKSIZE,
+            )
             conn.execute(insert_statement)
             conn.execute(text(f"DROP TABLE IF EXISTS {temp_table}"))
 
@@ -221,7 +405,16 @@ class PostgresLoader:
                     self.finish_table_load(load_id, status="SUCCESS", rows_loaded=rows_loaded)
             except Exception as error:
                 if load_id is not None:
-                    self.finish_table_load(load_id, status="FAILED", error_message=str(error))
+                    try:
+                        self.finish_table_load(load_id, status="FAILED", error_message=str(error))
+                    except Exception as bookkeeping_error:
+                        logger.error(
+                            "Could not mark table load %s as FAILED after %s.%s failed: %s",
+                            load_id,
+                            schema,
+                            table,
+                            bookkeeping_error,
+                        )
                 raise
 
         return results
@@ -463,3 +656,151 @@ class PostgresLoader:
                     "error_message": error_message,
                 },
             )
+
+    def run_post_load_validation(
+        self,
+        provider: str,
+        *,
+        mode: str = "warn",
+        lookback_hours: int = 24,
+    ) -> list[dict[str, object]]:
+        """Run bounded provider checks after a load.
+
+        ``mode`` controls production behavior:
+
+        * ``off`` logs that validation was skipped.
+        * ``warn`` logs findings/query errors without failing the sync.
+        * ``strict`` raises on a critical finding or a critical-check query
+          error. Informational checks remain non-blocking in every mode.
+
+        Results are returned for tests and operational callers. The complete
+        full-history validation packs in ``sql/`` remain the manual recovery
+        and reconciliation tool; this method intentionally checks only rows
+        updated during the configured recent window.
+        """
+        normalized_mode = mode.strip().lower()
+        if normalized_mode not in {"off", "warn", "strict"}:
+            raise ValueError(f"Unsupported validation mode: {mode!r}")
+        if lookback_hours < 1:
+            raise ValueError(f"lookback_hours must be at least 1, got {lookback_hours}")
+        if normalized_mode == "off":
+            logger.info("Post-load validation disabled for provider %s", provider)
+            return []
+
+        checks = POST_LOAD_VALIDATION_QUERIES.get(provider)
+        if checks is None:
+            message = f"No post-load validation checks are registered for provider {provider!r}"
+            if normalized_mode == "strict":
+                raise ValueError(message)
+            logger.warning(message)
+            return []
+
+        results: list[dict[str, object]] = []
+        for check_name, query, critical in checks:
+            try:
+                with self.engine.connect() as conn:
+                    issue_count = int(
+                        conn.execute(text(query), {"lookback_hours": lookback_hours}).scalar_one()
+                    )
+            except Exception as validation_error:
+                message = f"Post-load validation query failed for {provider} ({check_name}): {validation_error}"
+                logger.exception(message)
+                if normalized_mode == "strict" and critical:
+                    raise RuntimeError(message) from validation_error
+                results.append(
+                    {"check": check_name, "critical": critical, "status": "ERROR", "issue_count": None}
+                )
+                continue
+
+            status = "PASS" if issue_count == 0 else "FAIL"
+            result = {
+                "check": check_name,
+                "critical": critical,
+                "status": status,
+                "issue_count": issue_count,
+            }
+            results.append(result)
+            if issue_count:
+                message = (
+                    f"Post-load validation failed for {provider}: {check_name} "
+                    f"found {issue_count} issue(s) in the last {lookback_hours} hour(s)"
+                )
+                if critical:
+                    logger.error(message)
+                    if normalized_mode == "strict":
+                        raise RuntimeError(message)
+                else:
+                    logger.warning(message)
+            else:
+                logger.info("Post-load validation passed for %s: %s", provider, check_name)
+
+        return results
+
+    def get_last_successful_run(self, source_system: str) -> dict | None:
+        """Return the most recent SUCCESS sync run for `source_system`, or None.
+
+        The dict has keys sync_run_id, job_name, started_at, finished_at.
+        `started_at` is the reliable proxy for that run's fetch-window end
+        (jobs anchor their window at "now" immediately before starting the
+        run row), which is what EzyTrack gap recovery needs.
+        """
+        statement = text("""
+            SELECT sync_run_id, job_name, started_at, finished_at
+            FROM etl.sync_runs
+            WHERE source_system = :source_system AND status = 'SUCCESS'
+            ORDER BY started_at DESC
+            LIMIT 1
+        """)
+
+        with self.engine.connect() as conn:
+            row = conn.execute(statement, {"source_system": source_system}).mappings().first()
+
+        return dict(row) if row else None
+
+    def mark_abandoned_runs(self, threshold_hours: int, now_utc: datetime | None = None) -> list[dict]:
+        """Mark STARTED runs older than `threshold_hours` as ABANDONED.
+
+        Returns the runs that were marked (sync_run_id, source_system,
+        job_name, started_at) so callers can log/alert on each. Callers are
+        responsible for making sure no marked run is still genuinely active.
+        The housekeeping sensor/op in orchestration/monitoring.py maps each
+        candidate to its provider jobs and defers the eligible batch when a
+        corresponding Dagster run is still active.
+        """
+        cutoff = compute_abandoned_cutoff(threshold_hours, now_utc)
+
+        statement = text("""
+            UPDATE etl.sync_runs
+            SET status = 'ABANDONED',
+                finished_at = CURRENT_TIMESTAMP,
+                error_message = COALESCE(error_message, '')
+                    || :note
+            WHERE status = 'STARTED' AND started_at < :cutoff
+            RETURNING sync_run_id, source_system, job_name, started_at
+        """)
+
+        note = f" [Marked ABANDONED by housekeeping: STARTED for more than {threshold_hours}h with no finish]"
+
+        with self.engine.begin() as conn:
+            rows = conn.execute(statement, {"cutoff": cutoff, "note": note}).mappings().all()
+
+        marked = [dict(row) for row in rows]
+        for run in marked:
+            logger.warning(
+                "Marked sync run %s (%s / %s, started %s) as ABANDONED",
+                run["sync_run_id"],
+                run["source_system"],
+                run["job_name"],
+                run["started_at"],
+            )
+        return marked
+
+
+def compute_abandoned_cutoff(threshold_hours: int, now_utc: datetime | None = None) -> datetime:
+    """Return the UTC cutoff before which a STARTED run counts as abandoned."""
+    if threshold_hours < 1:
+        raise ValueError(f"threshold_hours must be at least 1, got {threshold_hours}")
+    now = now_utc if now_utc is not None else utc_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now - timedelta(hours=threshold_hours)
