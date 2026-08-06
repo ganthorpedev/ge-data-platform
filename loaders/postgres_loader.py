@@ -148,6 +148,18 @@ POST_LOAD_VALIDATION_QUERIES: dict[str, list[tuple[str, str, bool]]] = {
         ),
     ],
     "trackunit_location": [],
+    "evolution_project_reports": [
+        (
+            "recent rows missing their (company, id) load key",
+            """
+            SELECT COUNT(*)
+            FROM raw.evolution_project_reports
+            WHERE loaded_at >= CURRENT_TIMESTAMP - make_interval(hours => :lookback_hours)
+              AND (company IS NULL OR id IS NULL)
+            """,
+            True,
+        ),
+    ],
 }
 
 
@@ -170,6 +182,85 @@ def prepare_dataframe_for_load(df: pd.DataFrame) -> pd.DataFrame:
     if "loaded_at" not in prepared.columns:
         prepared["loaded_at"] = pd.Timestamp.now(tz="UTC")
     return prepared
+
+
+# The exact raw.evolution_project_reports column set (excluding loaded_at,
+# which prepare_dataframe_for_load adds), matching sql/029_create_accounts_
+# evolution_project_reports_schema.sql. Unlike the telemetry providers'
+# upsert_dataframe (which introspects the destination via
+# information_schema.columns because upstream API payloads can drift), this
+# pipeline fully owns its DDL and its transform's output columns are fixed,
+# so a plain constant is simpler and needs no live schema round-trip.
+EVOLUTION_PROJECT_REPORTS_COLUMNS = [
+    "company",
+    "id",
+    "account_description",
+    "account_type_description",
+    "cost_type",
+    "credit",
+    "customer",
+    "customer_unique_id",
+    "d_date",
+    "debit",
+    "description",
+    "fleet_number",
+    "inclusive_amount",
+    "master_sub_account",
+    "module",
+    "project",
+    "project_code",
+    "project_name",
+    "quantity_invoiced",
+    "reference",
+    "tax_amount",
+    "transaction_description",
+    "business_unit",
+]
+
+
+def validate_combined_for_full_replace(
+    df: pd.DataFrame,
+    *,
+    dataset_name: str = "raw.evolution_project_reports",
+) -> None:
+    """Refuse to replace the destination table with unsafe data.
+
+    This runs on the fully combined, transformed, snake_case DataFrame
+    (transforms.accounts.evolution.project_reports_transform.build_combined
+    output) before any staging or destination table is touched. Raises
+    `ValueError` -- never silently proceeds -- if:
+
+    * the extract is unexpectedly empty (a broken extraction returning zero
+      rows must never be allowed to wipe a previously loaded table via the
+      full replace below);
+    * `company` or `id` contain any missing values; or
+    * `(company, id)` is not unique (the destination's primary key, and the
+      column pair the atomic replace joins staging back into raw on).
+    """
+    if df.empty:
+        raise ValueError(f"Refusing to replace {dataset_name}: the combined extract is unexpectedly empty")
+
+    required_columns = {"company", "id"}
+    missing_columns = required_columns - set(df.columns)
+    if missing_columns:
+        raise ValueError(f"Refusing to replace {dataset_name}: missing required column(s) {sorted(missing_columns)}")
+
+    missing_company = df["company"].isna() | (df["company"].astype(str).str.strip() == "")
+    if missing_company.any():
+        raise ValueError(
+            f"Refusing to replace {dataset_name}: {int(missing_company.sum())} row(s) have a missing company"
+        )
+
+    missing_id = df["id"].isna()
+    if missing_id.any():
+        raise ValueError(f"Refusing to replace {dataset_name}: {int(missing_id.sum())} row(s) have a missing id")
+
+    duplicate_mask = df.duplicated(subset=["company", "id"], keep=False)
+    if duplicate_mask.any():
+        raise ValueError(
+            f"Refusing to replace {dataset_name}: {int(duplicate_mask.sum())} row(s) "
+            "share a duplicate (company, id) key"
+        )
 
 
 def finish_sync_run_failed_safe(loader: "PostgresLoader", sync_run_id: str, error: BaseException) -> None:
@@ -597,12 +688,136 @@ class PostgresLoader:
 
         return self._run_load_plan(load_plan, sync_run_id, provider)
 
+    def replace_accounts_evolution_project_reports(
+        self,
+        combined_df: pd.DataFrame,
+        sync_run_id: str | None = None,
+        provider: str = "evolution_project_reports",
+    ) -> dict[str, int]:
+        """Atomically replace raw.evolution_project_reports with combined_df.
+
+        `combined_df` is expected to be the output of
+        transforms.accounts.evolution.project_reports_transform.build_combined
+        (already snake_case, combined, and business-unit classified).
+
+        This is a full-refresh load, not an upsert: dbo.vwProjectsReports is
+        re-extracted in full every run (no evidenced incremental key), so a
+        row removed from the source must also disappear from PostgreSQL --
+        an upsert alone leaves it behind. Steps:
+
+        1. validate_combined_for_full_replace() -- refuse outright if the
+           extract looks unsafe (empty, missing keys, duplicate keys).
+        2. Stage `combined_df` into a freshly created staging table, typed
+           from the destination via `CREATE TABLE ... AS SELECT ... WHERE
+           1 = 0` so money columns keep their NUMERIC(20, 4) precision.
+        3. Verify the staged row count equals `len(combined_df)`.
+        4. Inside one transaction: DELETE every row from the destination,
+           INSERT ... SELECT the validated staged rows, then commit.
+        5. Drop the staging table, on both the success and failure paths.
+
+        Any failure before step 4's transaction commits -- a failed
+        validation, a staged-count mismatch, or a database error during the
+        swap itself -- leaves the destination table completely untouched;
+        the previous successful load remains the queryable production data.
+        A mid-transaction failure is rolled back by `engine.begin()` before
+        it can be observed by other sessions.
+
+        If `sync_run_id` is given, the load is recorded in
+        etl.sync_table_loads (one row covering the whole replace).
+
+        Returns {"raw.evolution_project_reports": rows_loaded} on success.
+        """
+        validate_combined_for_full_replace(combined_df)
+
+        prepared = prepare_dataframe_for_load(combined_df)
+        missing_columns = [c for c in EVOLUTION_PROJECT_REPORTS_COLUMNS if c not in prepared.columns]
+        if missing_columns:
+            raise ValueError(
+                "Combined extract is missing expected raw.evolution_project_reports "
+                f"column(s): {missing_columns}"
+            )
+        prepared = prepared[EVOLUTION_PROJECT_REPORTS_COLUMNS]
+
+        schema, table = "raw", "evolution_project_reports"
+        staging_table = f"evolution_project_reports_stage_{uuid.uuid4().hex[:8]}"
+        column_list_sql = ", ".join(prepared.columns)
+
+        load_id = None
+        if sync_run_id is not None:
+            load_id = self.start_table_load(sync_run_id, provider, schema, table, len(prepared))
+
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"CREATE TABLE staging.{staging_table} AS "
+                        f"SELECT {column_list_sql} FROM {schema}.{table} WHERE 1 = 0"
+                    )
+                )
+                # method="multi" batches many rows per INSERT; see
+                # TO_SQL_CHUNKSIZE for why 500.
+                prepared.to_sql(
+                    staging_table,
+                    con=conn,
+                    schema="staging",
+                    if_exists="append",
+                    index=False,
+                    method="multi",
+                    chunksize=TO_SQL_CHUNKSIZE,
+                )
+
+            with self.engine.connect() as conn:
+                staged_count = conn.execute(text(f"SELECT COUNT(*) FROM staging.{staging_table}")).scalar_one()
+
+            if staged_count != len(prepared):
+                raise RuntimeError(
+                    f"Staged row count ({staged_count}) does not match the transformed "
+                    f"DataFrame row count ({len(prepared)}) for {schema}.{table}; "
+                    "refusing to replace the destination table"
+                )
+
+            with self.engine.begin() as conn:
+                conn.execute(text(f"DELETE FROM {schema}.{table}"))
+                conn.execute(
+                    text(
+                        f"INSERT INTO {schema}.{table} ({column_list_sql}) "
+                        f"SELECT {column_list_sql} FROM staging.{staging_table}"
+                    )
+                )
+
+            rows_loaded = len(prepared)
+            if load_id is not None:
+                self.finish_table_load(load_id, status="SUCCESS", rows_loaded=rows_loaded)
+            return {f"{schema}.{table}": rows_loaded}
+
+        except Exception as error:
+            if load_id is not None:
+                try:
+                    self.finish_table_load(load_id, status="FAILED", error_message=str(error))
+                except Exception as bookkeeping_error:
+                    logger.error(
+                        "Could not mark table load %s as FAILED after the %s.%s replace failed: %s",
+                        load_id,
+                        schema,
+                        table,
+                        bookkeeping_error,
+                    )
+            raise
+        finally:
+            try:
+                with self.engine.begin() as conn:
+                    conn.execute(text(f"DROP TABLE IF EXISTS staging.{staging_table}"))
+            except Exception as cleanup_error:
+                logger.error(
+                    "Could not drop staging table staging.%s: %s", staging_table, cleanup_error
+                )
+
     def start_sync_run(
         self,
         source_system: str,
         job_name: str,
-        start_date: int,
-        end_date: int,
+        start_date: int | None,
+        end_date: int | None,
     ) -> str:
         """Insert a STARTED row into etl.sync_runs and return the new sync_run_id."""
         sync_run_id = str(uuid.uuid4())

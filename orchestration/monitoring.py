@@ -52,6 +52,8 @@ def _provider_and_source_for_dagster_job(job_name: str) -> tuple[str, str | None
         return "trackunit_location", "trackunit_location"
     if job_name.startswith("trackunit"):
         return "trackunit", "trackunit"
+    if job_name == "accounts_evolution_project_reports_sync":
+        return "evolution_project_reports", "evolution_project_reports"
     return "orchestration", None
 
 

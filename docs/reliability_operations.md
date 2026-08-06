@@ -166,28 +166,37 @@ The intended automation is:
 | `ezytrack_sync_schedule` | `45 */3 * * *` | Existing EzyTrack normal cursor/catch-up run every three hours. |
 | `ezytrack_daily_reconciliation_schedule` | `15 1 * * *` | Daily EzyTrack fixed-lookback `--reconcile` run at 01:15. |
 | `trackunit_daily_refresh_schedule` | `5 2 * * *` | Daily rolling two-day activity load followed by location enrichment. |
+| `trackunit_intraday_refresh_schedule` | `20 */3 * * *` | Safe intraday rolling one-day activity-only refresh; no enrichment. |
 | `trackunit_rolling_7_days_schedule` | `45 1 * * 0` | Sunday 01:45 rolling seven-day Trackunit reconciliation. |
 | `stale_started_run_cleanup_schedule` | `20 * * * *` | Hourly cleanup of eligible inactive `STARTED` rows. |
 | `telemetry_run_failure_sensor` | event-driven | Alerts once for each failed Dagster run. |
 | `telemetry_provider_freshness_sensor` | every 15 minutes | Checks last successful provider syncs and emits cooldown-deduplicated stale alerts. |
 
-There is no every-three-hours Trackunit activity schedule. Trackunit activity
-definitions also guard against each other because they write the same staging
-table. Schedule-time checks skip conflicting active runs, provider-level OS
-locks cover manual Dagster launches, and the production configuration example
-adds a run-tag concurrency limit for Trackunit. Both direct Trackunit CLI entry
-points acquire that same cross-process lock, so a recovery command also refuses
-to start while Trackunit activity or enrichment is running. The retained lock
+`trackunit_intraday_refresh_schedule` restores frequent Trackunit activity
+polling without reintroducing the 429 pressure the old every-three-hours
+schedule caused: it fetches only the current rolling day (`--rolling-days 1`,
+a materially smaller window than the old schedule's rolling two days) and
+never runs location enrichment, keeping that heavier work exclusive to
+`trackunit_daily_refresh_schedule`. All four Trackunit activity/enrichment
+definitions (`trackunit_daily_refresh`, `trackunit_intraday_refresh`,
+`trackunit_rolling_7_days`, `trackunit_location_enrichment`) also guard
+against each other because they write the same staging table. Schedule-time
+checks skip conflicting active runs, provider-level OS locks cover manual
+Dagster launches, and the production configuration example adds a run-tag
+concurrency limit for Trackunit. Both direct Trackunit CLI entry points
+acquire that same cross-process lock, so a recovery command also refuses to
+start while Trackunit activity or enrichment is running. The retained lock
 files live under project-root `.telemetry_etl_locks`; only the OS lock on an
 open handle is authoritative, so a crash cannot leave a permanent logical
 lock.
 
-The repository exports these Dagster jobs through `orchestration.definitions`:
-`dagster_smoke_test`, `sendem_sync`, `ezytrack_sync`,
-`ezytrack_daily_reconciliation`, `trackunit_rolling_2_days`,
-`trackunit_rolling_7_days`, `trackunit_location_enrichment`,
-`trackunit_daily_refresh`, and `stale_started_run_cleanup`. Standalone jobs are
-available for recovery even when they do not have their own schedule.
+The repository exports these ten Dagster jobs through
+`orchestration.definitions`: `dagster_smoke_test`, `sendem_sync`,
+`ezytrack_sync`, `ezytrack_daily_reconciliation`, `trackunit_daily_refresh`,
+`trackunit_intraday_refresh`, `trackunit_rolling_7_days`,
+`trackunit_location_enrichment`, `accounts_evolution_project_reports_sync`,
+and `stale_started_run_cleanup`. Standalone jobs are available for recovery
+even when they do not have their own schedule.
 
 Load and inspect the code location before enabling anything:
 
@@ -200,8 +209,8 @@ dagster sensor list -m orchestration.definitions
 ```
 
 The lists must contain only the expected schedules and sensors above. Start the
-six schedules from the Dagster Automation UI after migrations, tests, and smoke
-checks pass. Confirm both sensors are running.
+seven schedules from the Dagster Automation UI after migrations, tests, and
+smoke checks pass. Confirm both sensors are running.
 
 ### Dagster process monitoring
 

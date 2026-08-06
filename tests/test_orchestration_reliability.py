@@ -13,6 +13,7 @@ import dagster as dg
 import pytest
 
 from orchestration import alerts, definitions, monitoring, runner
+from orchestration import schedules as schedules_module
 from orchestration.overlap import (
     ACTIVE_RUN_STATUSES,
     EZYTRACK_DAGSTER_JOB_NAMES,
@@ -156,11 +157,13 @@ def test_definitions_are_loadable_and_schedules_have_intended_cadence() -> None:
         "ezytrack_sync_schedule",
         "ezytrack_daily_reconciliation_schedule",
         "trackunit_daily_refresh_schedule",
+        "trackunit_intraday_refresh_schedule",
         "trackunit_rolling_7_days_schedule",
         "stale_started_run_cleanup_schedule",
     }
 
     assert schedule_by_name["trackunit_daily_refresh_schedule"].cron_schedule == "5 2 * * *"
+    assert schedule_by_name["trackunit_intraday_refresh_schedule"].cron_schedule == "20 */3 * * *"
     assert schedule_by_name["trackunit_rolling_7_days_schedule"].cron_schedule == "45 1 * * 0"
     assert schedule_by_name["ezytrack_daily_reconciliation_schedule"].cron_schedule == "15 1 * * *"
     assert schedule_by_name["ezytrack_sync_schedule"].cron_schedule == "45 */3 * * *"
@@ -178,6 +181,51 @@ def test_trackunit_jobs_are_tagged_for_run_level_concurrency() -> None:
     repository = definitions.defs.get_repository_def()
     for job_name in TRACKUNIT_DAGSTER_JOB_NAMES:
         assert repository.get_job(job_name).tags["telemetry/provider"] == "trackunit"
+
+
+def test_intraday_schedule_skips_with_a_clear_reason_when_trackunit_group_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        schedules_module,
+        "find_active_run_job",
+        lambda instance, job_names: "trackunit_daily_refresh",
+    )
+    context = FakeContext(instance=object())
+
+    result = schedules_module._skip_if_overlapping(
+        context,  # type: ignore[arg-type]
+        job_name="trackunit_intraday_refresh",
+        overlap_with=schedules_module.TRACKUNIT_DAGSTER_JOB_NAMES,
+        run_tags={"telemetry/provider": "trackunit"},
+    )
+
+    assert isinstance(result, dg.SkipReason)
+    message = str(result)
+    assert "trackunit_intraday_refresh" in message
+    assert "trackunit_daily_refresh" in message
+
+
+def test_intraday_schedule_requests_a_run_when_trackunit_group_is_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        schedules_module,
+        "find_active_run_job",
+        lambda instance, job_names: None,
+    )
+    context = FakeContext(instance=object())
+    context.scheduled_execution_time = datetime(2026, 8, 6, 5, 20, tzinfo=timezone.utc)  # type: ignore[attr-defined]
+
+    result = schedules_module._skip_if_overlapping(
+        context,  # type: ignore[arg-type]
+        job_name="trackunit_intraday_refresh",
+        overlap_with=schedules_module.TRACKUNIT_DAGSTER_JOB_NAMES,
+        run_tags={"telemetry/provider": "trackunit"},
+    )
+
+    assert isinstance(result, dg.RunRequest)
+    assert result.tags == {"telemetry/provider": "trackunit"}
 
 
 def test_reconciliation_and_trackunit_jobs_pass_exact_cli_modes(
@@ -227,6 +275,15 @@ def test_reconciliation_and_trackunit_jobs_pass_exact_cli_modes(
     assert calls.pop() == (
         "jobs.sync_trackunit_daily_activity",
         ("--rolling-days", "7"),
+        runner.TRACKUNIT_OVERLAP_GROUP,
+        None,
+        None,
+    )
+
+    assert definitions.trackunit_intraday_refresh.execute_in_process().success
+    assert calls.pop() == (
+        "jobs.sync_trackunit_daily_activity",
+        ("--rolling-days", "1"),
         runner.TRACKUNIT_OVERLAP_GROUP,
         None,
         None,

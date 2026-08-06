@@ -1,20 +1,25 @@
 # Telemetry ETL
 
-Production ETL for synchronising Sendem/MiX, EzyTrack/Telematics Guru, and
-Trackunit telemetry into the PostgreSQL `telemetry_warehouse` database. Each
-provider has its own connector, transform, and load plan; loads use the existing
-UPSERT keys so overlapping windows and recovery reruns are idempotent.
+Production ETL for synchronising Sendem/MiX, EzyTrack/Telematics Guru,
+Trackunit telemetry, and Accounts/Evolution data into the PostgreSQL
+`telemetry_warehouse` database. Each source has its own connector, transform,
+and load plan; loads use the existing UPSERT keys so overlapping windows and
+recovery reruns are idempotent.
 
 ```text
 Provider API -> connector -> transform -> raw / staging -> warehouse / reporting
                                       \-> etl.sync_runs / etl.sync_table_loads
 ```
 
-- `raw` keeps provider-specific records close to their source shape.
+- `raw` keeps provider-specific records close to their source shape. Accounts
+  data (`raw.evolution_project_reports`) currently loads straight to `raw`
+  only -- no staging split yet, matching the source notebook's single
+  combined table.
 - `staging` contains cleaned and enriched provider tables.
 - `warehouse` and `reporting` expose stable reporting outputs, including the
   Power BI views.
-- `etl` records job and table-load outcomes for operations and recovery.
+- `etl` records job and table-load outcomes for operations and recovery,
+  shared by every source (telemetry and accounts alike).
 
 ## Quick start
 
@@ -60,10 +65,22 @@ python -m jobs.sync_ezytrack --reconcile
 # Trackunit: exact day, inclusive range, or rolling recovery
 python -m jobs.sync_trackunit_daily_activity --date 2026-08-02
 python -m jobs.sync_trackunit_daily_activity --from-date 2026-07-27 --to-date 2026-08-02
+python -m jobs.sync_trackunit_daily_activity --rolling-days 1
 python -m jobs.sync_trackunit_daily_activity --rolling-days 7
 
 # Run after Trackunit activity for a date when location enrichment is needed
 python -m jobs.sync_trackunit_location_enrichment --date 2026-08-02
+
+# Accounts: Evolution Project Reports (full extract of GE + TLS every run)
+python -m jobs.accounts.evolution.sync_project_reports
+```
+
+The Accounts/Evolution pipeline needs migration `sql/029_create_accounts_evolution_project_reports_schema.sql`
+applied (idempotent, safe to rerun) and the `EVOLUTION_*` variables in `.env`
+filled in -- see `.env.example`.
+
+```powershell
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\029_create_accounts_evolution_project_reports_schema.sql
 ```
 
 See the [operations runbook](docs/reliability_operations.md) before a backfill.
@@ -86,7 +103,13 @@ $env:DAGSTER_HOME = 'C:\Local Warehouse\Telemetry\dagster_home'
 dagster job list -m orchestration.definitions
 dagster schedule list -m orchestration.definitions
 dagster sensor list -m orchestration.definitions
+# Equivalent -w form, using the repo's workspace.yaml:
+dagster schedule list -w workspace.yaml
 ```
+
+Expect exactly 10 jobs, 7 schedules, and 2 sensors, including the new
+`trackunit_intraday_refresh` job and `trackunit_intraday_refresh_schedule`
+(`20 */3 * * *`, `Africa/Harare`).
 
 Live smoke tests are separate: they require valid provider credentials and a
 real PostgreSQL database with the production migrations applied, and they write

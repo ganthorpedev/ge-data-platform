@@ -21,6 +21,7 @@ from orchestration.definitions import (
     sendem_sync,
     stale_started_run_cleanup,
     trackunit_daily_refresh,
+    trackunit_intraday_refresh,
     trackunit_rolling_7_days,
 )
 from orchestration.overlap import (
@@ -72,6 +73,29 @@ def trackunit_daily_refresh_schedule(
     return _skip_if_overlapping(
         context,
         job_name="trackunit_daily_refresh",
+        overlap_with=TRACKUNIT_DAGSTER_JOB_NAMES,
+        run_tags={"telemetry/provider": "trackunit"},
+    )
+
+
+@dg.schedule(
+    job=trackunit_intraday_refresh,
+    cron_schedule="20 */3 * * *",
+    execution_timezone=TIMEZONE,
+    default_status=dg.DefaultScheduleStatus.STOPPED,
+)
+def trackunit_intraday_refresh_schedule(
+    context: dg.ScheduleEvaluationContext,
+) -> dg.SkipReason | dg.RunRequest:
+    """Safe intraday rolling one-day activity refresh; no enrichment.
+
+    Shares the Trackunit overlap group with the daily and weekly jobs, so an
+    active daily refresh or weekly reconciliation causes this evaluation to
+    skip with a clear reason instead of launching a concurrent run.
+    """
+    return _skip_if_overlapping(
+        context,
+        job_name="trackunit_intraday_refresh",
         overlap_with=TRACKUNIT_DAGSTER_JOB_NAMES,
         run_tags={"telemetry/provider": "trackunit"},
     )
@@ -168,6 +192,7 @@ def stale_started_run_cleanup_schedule(
 
 schedules = [
     trackunit_daily_refresh_schedule,
+    trackunit_intraday_refresh_schedule,
     sendem_sync_schedule,
     ezytrack_sync_schedule,
     ezytrack_daily_reconciliation_schedule,

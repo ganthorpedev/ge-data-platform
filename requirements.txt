@@ -9,5 +9,9 @@ psycopg2-binary==2.9.12
 dagster==1.13.14
 dagster-webserver==1.13.14
 
+# SQL Server ODBC driver for Accounts/Evolution extraction (requires the
+# "ODBC Driver 17 for SQL Server" system driver to be installed separately).
+pyodbc==5.2.0
+
 # Test runner (provider tests mock HTTP and never call live APIs).
 pytest==9.1.1

@@ -26,16 +26,20 @@ EZYTRACK_DAGSTER_JOB_NAMES: tuple[str, ...] = (
 )
 TRACKUNIT_DAGSTER_JOB_NAMES: tuple[str, ...] = (
     "trackunit_daily_refresh",
-    "trackunit_rolling_2_days",
+    "trackunit_intraday_refresh",
     "trackunit_rolling_7_days",
     "trackunit_location_enrichment",
 )
 HOUSEKEEPING_DAGSTER_JOB_NAMES: tuple[str, ...] = ("stale_started_run_cleanup",)
+ACCOUNTS_EVOLUTION_PROJECT_REPORTS_DAGSTER_JOB_NAMES: tuple[str, ...] = (
+    "accounts_evolution_project_reports_sync",
+)
 
 ALL_PROVIDER_DAGSTER_JOB_NAMES: tuple[str, ...] = (
     *SENDEM_DAGSTER_JOB_NAMES,
     *EZYTRACK_DAGSTER_JOB_NAMES,
     *TRACKUNIT_DAGSTER_JOB_NAMES,
+    *ACCOUNTS_EVOLUTION_PROJECT_REPORTS_DAGSTER_JOB_NAMES,
 )
 
 
@@ -89,4 +93,6 @@ def dagster_jobs_for_sync_run(source_system: str, job_name: str) -> tuple[str, .
         return TRACKUNIT_DAGSTER_JOB_NAMES
     if normalized_job == "trackunit_location_enrichment_sync":
         return TRACKUNIT_DAGSTER_JOB_NAMES
+    if normalized_source == "evolution_project_reports" or normalized_job == "evolution_project_reports_sync":
+        return ACCOUNTS_EVOLUTION_PROJECT_REPORTS_DAGSTER_JOB_NAMES
     return ()

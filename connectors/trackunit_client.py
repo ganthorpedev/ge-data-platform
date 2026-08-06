@@ -358,6 +358,7 @@ class TrackunitClient:
             f"/{metric_name}/{start_utc}/{end_utc}/{page}"
         )
 
+
         if self.settings.request_delay_seconds > 0:
             time.sleep(self.settings.request_delay_seconds)
 

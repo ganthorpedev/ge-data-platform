@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -146,6 +147,52 @@ REQUIRED_TRACKUNIT_ENV_VARS = (
     "TRACKUNIT_PASSWORD",
     "TRACKUNIT_ACCOUNT_ID",
 )
+
+REQUIRED_EVOLUTION_ENV_VARS = (
+    "EVOLUTION_SQL_DRIVER",
+    "EVOLUTION_SQL_SERVER",
+    "EVOLUTION_SQL_USERNAME",
+    "EVOLUTION_SQL_PASSWORD",
+    "EVOLUTION_GE_DATABASE",
+    "EVOLUTION_TLS_DATABASE",
+)
+
+DEFAULT_EVOLUTION_PROJECT_REPORTS_VIEW = "dbo.vwProjectsReports"
+DEFAULT_EVOLUTION_SQL_CONNECT_TIMEOUT_SECONDS = 30
+
+# A plain two-part "schema.object" SQL Server identifier: letters, digits,
+# and underscores only, each part starting with a letter or underscore. No
+# brackets, whitespace, semicolons, comments, or extra parts are accepted.
+_EVOLUTION_VIEW_NAME_PATTERN = re.compile(
+    r"^(?P<schema>[A-Za-z_][A-Za-z0-9_]*)\.(?P<object>[A-Za-z_][A-Za-z0-9_]*)$"
+)
+
+
+def validate_evolution_view_name(view_name: str) -> str:
+    """Validate a configurable Evolution view/table name and bracket-quote it.
+
+    `view_name` (EVOLUTION_PROJECT_REPORTS_VIEW) is substituted directly into
+    a SQL `FROM` clause by connectors/accounts/evolution/project_reports.py,
+    so it must never be allowed to carry arbitrary SQL. Only a plain
+    "schema.object" identifier is accepted (e.g. "dbo.vwProjectsReports");
+    anything else -- extra parts, whitespace, semicolons, comments, brackets
+    -- is rejected outright rather than sanitised.
+
+    Returns the identifier re-quoted as "[schema].[object]" so it is always
+    treated as a literal identifier by SQL Server, even if some future
+    schema/object name happens to collide with a reserved word.
+    """
+    if not isinstance(view_name, str):
+        raise ValueError(f"EVOLUTION_PROJECT_REPORTS_VIEW must be a string, got {type(view_name).__name__}")
+
+    match = _EVOLUTION_VIEW_NAME_PATTERN.fullmatch(view_name.strip())
+    if match is None:
+        raise ValueError(
+            "EVOLUTION_PROJECT_REPORTS_VIEW must be a plain schema-qualified identifier "
+            f"like 'dbo.vwProjectsReports' (letters, digits, underscores only); got {view_name!r}"
+        )
+
+    return f"[{match.group('schema')}].[{match.group('object')}]"
 
 
 @dataclass(frozen=True)
@@ -420,5 +467,74 @@ def get_trackunit_settings() -> TrackunitSettings:
         ),
         rate_limit_max_delay_seconds=float(
             os.getenv("TRACKUNIT_RATE_LIMIT_MAX_DELAY_SECONDS", DEFAULT_TRACKUNIT_RATE_LIMIT_MAX_DELAY_SECONDS)
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class EvolutionSourceDatabase:
+    """One Evolution company database reachable on the shared SQL Server.
+
+    `company` is the short code (e.g. "GE", "TLS") stamped onto every
+    extracted row so downstream transforms/loads can attribute and combine
+    rows without a second per-company code path.
+    """
+
+    company: str
+    database: str
+
+
+@dataclass(frozen=True)
+class EvolutionSettings:
+    """Configuration required to extract Accounts/Evolution source data.
+
+    GE and TLS are two databases on the *same* SQL Server instance, reached
+    with the same driver/credentials -- only `database` differs per company.
+    `sources` is therefore a tuple, not two separate settings objects, so
+    connectors/accounts/evolution code can loop over it instead of
+    duplicating a fetch path per company.
+    """
+
+    driver: str
+    server: str
+    username: str
+    password: str
+    project_reports_view: str
+    connect_timeout_seconds: int
+    sources: tuple[EvolutionSourceDatabase, ...]
+
+
+def get_evolution_settings() -> EvolutionSettings:
+    """Load, validate, and return Accounts/Evolution settings from the environment.
+
+    Loads `.env` via `load_project_env()` and raises `ValueError` if any
+    required value is missing. `project_reports_view` defaults to
+    `dbo.vwProjectsReports` (the view used by the current extraction
+    pipeline); `connect_timeout_seconds` defaults to 30.
+    """
+    load_project_env()
+
+    missing = [name for name in REQUIRED_EVOLUTION_ENV_VARS if not os.getenv(name)]
+    if missing:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+    raw_view_name = os.getenv("EVOLUTION_PROJECT_REPORTS_VIEW", DEFAULT_EVOLUTION_PROJECT_REPORTS_VIEW)
+    # Fail fast on a bad configuration value; the canonical (unbracketed,
+    # stripped) form is what gets stored, re-validated and bracket-quoted
+    # again immediately before use in connectors.accounts.evolution.
+    validate_evolution_view_name(raw_view_name)
+
+    return EvolutionSettings(
+        driver=os.environ["EVOLUTION_SQL_DRIVER"],
+        server=os.environ["EVOLUTION_SQL_SERVER"],
+        username=os.environ["EVOLUTION_SQL_USERNAME"],
+        password=os.environ["EVOLUTION_SQL_PASSWORD"],
+        project_reports_view=raw_view_name.strip(),
+        connect_timeout_seconds=_env_int(
+            "EVOLUTION_SQL_CONNECT_TIMEOUT_SECONDS", DEFAULT_EVOLUTION_SQL_CONNECT_TIMEOUT_SECONDS
+        ),
+        sources=(
+            EvolutionSourceDatabase(company="GE", database=os.environ["EVOLUTION_GE_DATABASE"]),
+            EvolutionSourceDatabase(company="TLS", database=os.environ["EVOLUTION_TLS_DATABASE"]),
         ),
     )

@@ -6,6 +6,7 @@ import dagster as dg
 
 from orchestration.monitoring import sensors, stale_started_run_cleanup
 from orchestration.runner import (
+    ACCOUNTS_EVOLUTION_OVERLAP_GROUP,
     EZYTRACK_OVERLAP_GROUP,
     SENDEM_OVERLAP_GROUP,
     TRACKUNIT_OVERLAP_GROUP,
@@ -18,6 +19,7 @@ from orchestration.runner import (
 SENDEM_RUN_TAGS = {"telemetry/provider": "sendem"}
 EZYTRACK_RUN_TAGS = {"telemetry/provider": "ezytrack"}
 TRACKUNIT_RUN_TAGS = {"telemetry/provider": "trackunit"}
+ACCOUNTS_EVOLUTION_PROJECT_REPORTS_RUN_TAGS = {"accounts/dataset": "evolution_project_reports"}
 
 
 @dg.op
@@ -74,18 +76,19 @@ def ezytrack_daily_reconciliation() -> None:
 
 
 @dg.op
-def trackunit_rolling_2_days_op(context: dg.OpExecutionContext) -> None:
+def trackunit_intraday_refresh_op(context: dg.OpExecutionContext) -> None:
+    """Light, frequent activity-only refresh; enrichment stays daily-only."""
     run_module(
         context,
         "jobs.sync_trackunit_daily_activity",
-        ["--rolling-days", "2"],
+        ["--rolling-days", "1"],
         overlap_group=TRACKUNIT_OVERLAP_GROUP,
     )
 
 
 @dg.job(tags=TRACKUNIT_RUN_TAGS)
-def trackunit_rolling_2_days() -> None:
-    trackunit_rolling_2_days_op()
+def trackunit_intraday_refresh() -> None:
+    trackunit_intraday_refresh_op()
 
 
 @dg.op
@@ -161,15 +164,30 @@ def trackunit_daily_refresh() -> None:
     trackunit_daily_refresh_op()
 
 
+@dg.op
+def accounts_evolution_project_reports_sync_op(context: dg.OpExecutionContext) -> None:
+    run_module(
+        context,
+        "jobs.accounts.evolution.sync_project_reports",
+        overlap_group=ACCOUNTS_EVOLUTION_OVERLAP_GROUP,
+    )
+
+
+@dg.job(tags=ACCOUNTS_EVOLUTION_PROJECT_REPORTS_RUN_TAGS)
+def accounts_evolution_project_reports_sync() -> None:
+    accounts_evolution_project_reports_sync_op()
+
+
 defs_jobs = [
     dagster_smoke_test,
     sendem_sync,
     ezytrack_sync,
     ezytrack_daily_reconciliation,
-    trackunit_rolling_2_days,
+    trackunit_intraday_refresh,
     trackunit_rolling_7_days,
     trackunit_location_enrichment,
     trackunit_daily_refresh,
+    accounts_evolution_project_reports_sync,
     stale_started_run_cleanup,
 ]
 
