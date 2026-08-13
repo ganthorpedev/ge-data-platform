@@ -8,20 +8,25 @@ document written when `ge_warehouse`'s baseline was first created; that
 content lives here now, kept current alongside the rest of the
 documentation instead of drifting in a separate file.
 
-**Status: baseline + Trackunit + Sendem + EzyTrack raw/staging migrated and
-validated.** Trackunit's, Sendem's, and EzyTrack's historical `raw`/`staging`
-data have been migrated into `raw_trackunit`/`stg_trackunit`,
+**Status: baseline + Trackunit + Sendem + EzyTrack + Evolution raw/staging
+migrated and validated.** Trackunit's, Sendem's, and EzyTrack's historical
+`raw`/`staging` data have been migrated into `raw_trackunit`/`stg_trackunit`,
 `raw_sendem`/`stg_sendem`, and `raw_ezytrack`/`stg_ezytrack` in
 `ge_warehouse`, with full reconciliation against `telemetry_warehouse` and a
-real fresh-ingestion test for each -- see
+real fresh-ingestion test for each. Evolution Project Reports is different in
+kind: `telemetry_warehouse` has never actually held any Evolution data (see
+below), so this was a **first platform load**, not a historical migration --
+`raw_evolution.project_report`/`stg_evolution.project_report` were populated
+directly from a live, read-only Evolution SQL Server extraction, reconciled
+against that exact extracted batch. See
 [Trackunit migration (completed)](#trackunit-migration-completed),
-[Sendem migration (completed)](#sendem-migration-completed), and
-[EzyTrack migration (completed)](#ezytrack-migration-completed) below.
-Evolution and FieldOps have not moved. No Dagster schedule writes to
-`ge_warehouse` -- `telemetry_warehouse` remains the only database any
-*scheduled* job or Power BI report actually uses; all three migrated
-sources' platform-target code paths exist but are exercised only by manual
-invocation.
+[Sendem migration (completed)](#sendem-migration-completed),
+[EzyTrack migration (completed)](#ezytrack-migration-completed), and
+[Evolution migration (completed)](#evolution-migration-completed) below.
+FieldOps has not moved. No Dagster schedule writes to `ge_warehouse` --
+`telemetry_warehouse` remains the only database any *scheduled* job or Power
+BI report actually uses; all four migrated sources' platform-target code
+paths exist but are exercised only by manual invocation.
 
 ## The principle
 
@@ -52,8 +57,8 @@ flowchart TD
 |---|---|---|
 | `telemetry_warehouse` | Live production, unchanged throughout | ONGOING (LEGACY) |
 | parallel `ge_warehouse` | Schemas, `ops` metadata structure, roles, `core.dim_date` | IMPLEMENTED |
-| source-by-source migration | Each source's ingestion ported to write `raw_<source>`/`stg_<source>` | IN PROGRESS -- Trackunit, Sendem, and EzyTrack done (raw/staging only); Evolution/FieldOps NOT STARTED |
-| validation | Row counts, spot checks, comparison queries between old and new for the same window | DONE for Trackunit (`scripts/validate_trackunit_migration.py`), Sendem (`scripts/validate_sendem_migration.py`), and EzyTrack (`scripts/validate_ezytrack_migration.py`); NOT STARTED for other sources |
+| source-by-source migration | Each source's ingestion ported to write `raw_<source>`/`stg_<source>` | IN PROGRESS -- Trackunit, Sendem, EzyTrack, and Evolution done (raw/staging only); FieldOps NOT STARTED |
+| validation | Row counts, spot checks, comparison queries between old and new for the same window | DONE for Trackunit (`scripts/validate_trackunit_migration.py`), Sendem (`scripts/validate_sendem_migration.py`), EzyTrack (`scripts/validate_ezytrack_migration.py`), and Evolution (`scripts/validate_evolution_migration.py`, against the exact extracted batch -- see below); NOT STARTED for FieldOps |
 | `core` | Cross-source conformance (`dim_asset` first, then facts) built on validated staging data | NOT STARTED -- blocked on source-map design, `docs/warehouse/source-mapping.md` |
 | marts | `mart_<domain>` objects built on `core` | NOT STARTED |
 | consumer cutover | Power BI/Excel/applications repointed from `telemetry_warehouse.reporting` to the new `reporting` schema | NOT STARTED |
@@ -108,7 +113,7 @@ object's *logic*, not its DDL, gets rebuilt once `core` exists under it).
 | `raw.sendem_events_assets_daily` | `raw_sendem.event_daily` | **migrated + validated** | 16,285 historical rows (+ live rows from fresh-ingestion testing); not re-fetchable |
 | `raw.ezytrack_assets` | `raw_ezytrack.asset` | **migrated + validated** | 51 historical rows (+4 from live-ingestion testing) |
 | `raw.ezytrack_trips` | `raw_ezytrack.trip` | **migrated + validated** | 823 historical rows (+25 from live-ingestion testing) |
-| `raw.evolution_project_reports` (defined; not yet applied on the local dev database) | `raw_evolution.project_report` | structural-only | Full-refresh source, always re-derivable from the live view |
+| -- (`raw.evolution_project_reports` was defined by `telemetry_migrations/029` but confirmed **never applied** -- no legacy data exists) | `raw_evolution.project_report` | **first platform load + validated** | 29,948 rows (GE 21,582 + TLS 8,366) at load time; full-refresh source, always re-derivable from the live view. `id` is a transaction-type code (11 values), not a row key -- surrogate `project_report_id` PK, no natural key. See [Evolution migration (completed)](#evolution-migration-completed). |
 | -- (no source exists) | `raw_fieldops.*` | structural-only (empty schema) | See `docs/sources/fieldops.md` |
 
 ### Staging layer
@@ -122,7 +127,7 @@ object's *logic*, not its DDL, gets rebuilt once `core` exists under it).
 | `staging.sendem_fact_trips_daily` / `_fact_events_daily` | `stg_sendem.trip_daily` / `.event_daily` | **migrated + validated, with legacy `clean.*` history folded in** | 1,906 / 16,285 rolling-window rows + 11,439 / 106,188 exclusive historical rows from `clean.*` -- see [Sendem migration (completed)](#sendem-migration-completed) |
 | `staging.ezytrack_dim_assets` | `stg_ezytrack.asset` | **migrated + validated** | 51 historical rows (+4 from live-ingestion testing) |
 | `staging.ezytrack_fact_trips` | `stg_ezytrack.trip` | **migrated + validated** | 823 historical rows (+25 from live-ingestion testing) |
-| -- (no staging step today; `raw.evolution_project_reports` already carries `business_unit`) | `stg_evolution.project_report` | deferred | Would need a definition of what "cleaning" adds beyond what raw already does |
+| -- (no legacy staging step; legacy `raw.evolution_project_reports` blurred raw+business_unit into one table, and was never populated anyway) | `stg_evolution.project_report` | **first platform load + validated** | 29,948 rows; same rows as `raw_evolution.project_report` plus `business_unit` (the one derived column the pipeline computes) -- see [Evolution migration (completed)](#evolution-migration-completed) |
 
 ### Historical backfill (`clean` schema -- legacy, out of band)
 
@@ -610,11 +615,181 @@ unchanged under the platform target.
   guard tests cover the catch-up-safety surface without a real multi-day
   provider pull.
 
+## Evolution migration (completed)
+
+The fourth source migration, and different in kind from the first three:
+`telemetry_warehouse` has never actually held any Evolution data, so this is
+a **FIRST PLATFORM LOAD**, not a historical migration. `core`/`mart_finance`
+were deliberately **not** touched -- this phase stops at staging, same as
+Trackunit, Sendem, and EzyTrack. Evolution is a source system, not a finance
+architecture -- see `docs/sources/evolution.md`.
+
+### Legacy objects found (inventory, before any DDL)
+
+Verified against the live `telemetry_warehouse` catalog (read-only session,
+independently confirmed local via `inet_server_addr()` = `::1`): **none**.
+No `raw.evolution_*`, `staging.evolution_*`, or `accounts.*` object exists
+anywhere. `sql/legacy/telemetry_migrations/029_create_accounts_evolution_project_reports_schema.sql`
+is a real file in this repository, but its own `CREATE TABLE` was never
+actually run here -- confirmed both by the catalog search finding nothing
+and by `etl.sync_runs`: exactly 3 rows for `source_system =
+'evolution_project_reports'`, all `FAILED`, all on 2026-08-12 (one
+credential failure, two refused by the application's own pre-load
+validation -- see "A discovered gap" below). No legacy row count, key set,
+date range, or null profile exists to report because no legacy data exists.
+Decision (per task section 2): **Migration mode: FIRST SOURCE LOAD.**
+
+### Evolution SQL Server source confirmed
+
+Read-only inspection (the same `SELECT`-only access the application's own
+`ReadOnly` SQL login already uses -- see "A discovered gap" below) of
+`dbo.vwProjectsReports` on both configured Evolution databases:
+
+| | GE (`Ganthorpe Enterprises Live`) | TLS (`Total Loading Solutions Live`) |
+|---|---|---|
+| Row count at inspection | 21,582 | 8,362 |
+| Row count at load time (~35 min later) | 21,582 | 8,366 |
+| `DDate` range | 2025-01-31 .. 2026-11-30 | 2025-01-31 .. 2027-07-09 |
+| Null `Id` | 0 | 0 |
+| Null `ProjectCode` | 98 | 51 |
+| Null `Customer` | 0 | 6,785 |
+
+The row-count drift between inspection and load time (TLS +4) is real,
+expected freshness variance in a live production accounting system, not a
+defect -- exactly what task section 10 anticipated ("the live Evolution
+database may change while testing"). `DDate` extending past "today"
+(2026-08-13) is real source data, not a bug -- some rows represent
+forward-dated/scheduled transactions; not reinterpreted here.
+
+### A discovered gap, and how it was handled
+
+Not a shared-code gap this time (EzyTrack's kind), but a **wrong source
+assumption baked into the frozen legacy DDL and the still-current legacy
+validation code** -- and the reason all 3 real legacy sync attempts have
+ever failed:
+
+`telemetry_migrations/029` and `ge_data_platform.common.database.
+validate_combined_for_full_replace` both assume `Id` is a `BIGINT` row
+identifier and that `(company, id)` is `dbo.vwProjectsReports`'s natural
+primary key. Live read-only inspection of both GE and TLS databases
+disproves this directly: `Id` is `VARCHAR`, takes only **11 distinct values
+total** (`APTx`, `ARTx`, `CB`, `Crn`, `Grv`, `IJr`, `Inv`, `JL`, `OGrv`,
+`Rts`, `SADJ`), and maps 1:1 to `Module` -- it is a transaction-type/module
+code, not a per-row identifier. Even the widest practical composite key
+(`id, cost_type, module, reference, d_date`) leaves 12,659 (GE) / 2,972
+(TLS) duplicate rows; a `CHECKSUM`-based full-row comparison suggests
+roughly 200 (GE) / 213 (TLS) rows are fully identical across every extracted
+column. **`dbo.vwProjectsReports` has no reliable natural/business key at
+the row grain.** This is exactly why the 2 non-credential legacy sync
+attempts on 2026-08-12 both failed with "Refusing to replace
+raw.evolution_project_reports: 29,130/29,137 row(s) share a duplicate
+(company, id) key" -- the application's own existing safety check did
+exactly its job and refused to load data it couldn't validate; nothing was
+ever corrupted.
+
+Handled by **not** touching the frozen legacy migration or the legacy
+target's validation/DDL (both out of scope -- `telemetry_warehouse` stays
+untouched, and the legacy Dagster job's behavior is unaffected), and instead
+designing the new platform objects correctly from the start:
+`raw_evolution.project_report`/`stg_evolution.project_report` use a
+load-time surrogate `BIGSERIAL` primary key (`project_report_id`, not stable
+across reloads, referenced by nothing) and enforce no uniqueness on the
+source columns -- duplicate source rows are loaded as-is, never silently
+deduplicated. A new, separate validation function,
+`validate_project_report_batch_for_platform_load` (in the same module,
+alongside the untouched legacy one), enforces only the assumptions the
+source data actually supports (non-empty, `company` present and non-blank)
+and explicitly allows duplicate `(company, id)` pairs. See
+`sql/migrations/011_create_raw_evolution.sql` for the full evidence trail.
+The three-run FAILED history in `etl.sync_runs` was left exactly as found --
+`telemetry_warehouse` stays read-only.
+
+Separately (much smaller): the first legacy failure was a login failure for
+SQL user `'ReadOnly'` -- confirming the credential this application is
+actually configured with is already a read-only-privileged login at the
+database level, not just an application-level convention.
+
+### First controlled load and reconciliation results
+
+`scripts/run_evolution_first_load.py` performs the exact pipeline task
+section 9 specifies (`Evolution SQL Server -> dbo.vwProjectsReports ->
+Python extraction -> raw_evolution.project_report ->
+stg_evolution.project_report`), using the real production functions
+(`extract_all`, `build_raw`, `add_business_unit_classification`,
+`PostgresLoader.replace_evolution_project_reports_platform`) -- not a
+second implementation. Because the source can change mid-run, it captures
+batch evidence (row counts, null profile, date bounds, exact `Decimal`
+monetary aggregates, business_unit distribution) from the **exact extracted
+DataFrames**, before any load happens. `scripts/validate_evolution_migration.py`
+then reconciles `ge_warehouse` against that captured evidence -- not a fresh
+Evolution re-query, which per task section 10 must never be allowed to
+manufacture a false mismatch:
+
+```text
+EVOLUTION PROJECT REPORTS VALIDATION
+
+source assumptions (no natural key; id is a type code, not a row id)  PASS
+extracted batch internal consistency                                 PASS
+raw_evolution.project_report row count                                PASS
+raw_evolution.project_report per-company row count                    PASS
+raw_evolution.project_report null(*)                                  PASS (8 columns)
+raw_evolution.project_report sum(credit/debit/inclusive_amount/tax_amount)  PASS
+raw_evolution.project_report date bounds                              PASS
+raw_evolution.project_report surrogate key integrity                  PASS
+stg_evolution.project_report row count                                PASS
+stg_evolution.project_report per-company row count                    PASS
+stg_evolution.project_report null(*)                                  PASS (8 columns)
+stg_evolution.project_report sum(credit/debit/inclusive_amount/tax_amount)  PASS
+stg_evolution.project_report date bounds                              PASS
+stg_evolution.project_report business_unit distribution               PASS
+stg_evolution.project_report surrogate key integrity                  PASS
+
+Overall: PASS
+```
+
+Every monetary aggregate check used exact `Decimal` equality (`credit`
+22,713,237.4354; `debit` 20,726,482.6609; `inclusive_amount`
+17,691,387.9455; `tax_amount` 2,294,012.9400 -- combined GE+TLS) -- no
+tolerance band anywhere. Load result: 29,948 rows into each of
+`raw_evolution.project_report` and `stg_evolution.project_report` (GE
+21,582 + TLS 8,366, matching the extracted batch exactly).
+
+Re-running `scripts/run_evolution_first_load.py` a second time (idempotency
+test) re-extracted from the still-unchanged live source and produced a
+byte-identical batch (same row counts, same monetary aggregates, same
+content fingerprint) to the first run; the full-replace load left both
+tables at exactly 29,948 rows -- confirmed directly, not just inferred from
+the load function's own return value -- with no growth or duplication.
+Re-running `scripts/validate_evolution_migration.py` against the fresh
+evidence still reported `Overall: PASS`.
+
+### What was intentionally not done in the Evolution phase
+
+- `core.dim_project`/`core.*_source_map` -- not built.
+- `mart_finance.*` -- not built (Evolution is a source system, not "the
+  finance mart" -- see `docs/sources/evolution.md`).
+- No Dagster schedule points at `ge_warehouse`; `--target platform` is
+  manual-only, same as the other three sources.
+- The frozen legacy `telemetry_migrations/029` and legacy
+  `validate_combined_for_full_replace`/`replace_accounts_evolution_project_reports`
+  were left unmodified -- `telemetry_warehouse` and the legacy Dagster job
+  are unaffected by this migration, including the wrong `(company, id)` key
+  assumption discovered above.
+- `ops.pipeline_run`/`ops.table_load` are not written to for platform-target
+  runs (sync tracking is skipped, not redirected) -- same precedent as the
+  other three sources.
+- No second Evolution dataset (e.g. a future invoicing/GL extract) was
+  started.
+- Provider (SQL Server) writes: none. Every Evolution query issued during
+  this migration was a plain `SELECT`; no `INSERT`/`UPDATE`/`DELETE`/`MERGE`/
+  DDL was ever executed against Evolution.
+
 ## What this phase intentionally did not do
 
-- No row of Evolution or FieldOps application data copied from
-  `telemetry_warehouse` into `ge_warehouse` (Trackunit, Sendem, and EzyTrack
-  are the three exceptions -- see above).
+- No row of FieldOps application data copied from `telemetry_warehouse`
+  into `ge_warehouse` (Trackunit, Sendem, EzyTrack, and Evolution are the
+  four exceptions -- see above; Evolution had no legacy rows to copy in the
+  first place, see [Evolution migration (completed)](#evolution-migration-completed)).
 - No `core` object except `core.dim_date`.
 - No `core.*_source_map` table (pattern chosen, not built -- see
   `docs/warehouse/source-mapping.md`).

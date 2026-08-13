@@ -1,7 +1,14 @@
 # Accounts / Evolution
 
-**Status: IMPLEMENTED and running against `telemetry_warehouse` (LEGACY
-target database). Not yet ported to `raw_evolution`/`stg_evolution`.**
+**Status: IMPLEMENTED. Production Dagster job still writes only to
+`telemetry_warehouse` (LEGACY target, default) -- and has never actually
+succeeded there (see below). `raw_evolution`/`stg_evolution` now exist in
+`ge_warehouse`, populated by a first platform load and validated, and the
+same code can write there via `--target platform` -- opt-in, not the
+default, not wired to any schedule. See
+`docs/migration/legacy-to-platform-migration.md#evolution-migration-completed`
+for the full migration record, including a wrong source-key assumption this
+migration discovered and fixed for the platform target only.**
 
 **Evolution is a source system, not a finance architecture.** It happens to
 be the current source for most finance-relevant data, but the future
@@ -69,15 +76,91 @@ python -m ge_data_platform.sources.evolution.project_reports
 
 ## Known constraints (from the code, not guessed)
 
-- `id` is assumed `BIGINT`, unique only within one company's database (the
-  natural/primary key is the `(company, id)` pair, not `id` alone) -- this
-  is a documented assumption pending confirmation, not a proven fact; see
+- **`id` is NOT a row identifier.** The documented assumption in the legacy
+  schema/validation (`(company, id)` as the natural primary key, `id`
+  `BIGINT`) was disproven during the Evolution `raw_evolution`/`stg_evolution`
+  migration: live read-only inspection of `dbo.vwProjectsReports` on both GE
+  and TLS shows `Id` is `VARCHAR` and takes only 11 distinct values total
+  (`Inv`, `JL`, `CB`, `APTx`, `ARTx`, `Crn`, `Grv`, `IJr`, `OGrv`, `Rts`,
+  `SADJ`), mapping 1:1 to `Module` -- it is a transaction-type/module code.
+  **`dbo.vwProjectsReports` has no reliable natural/business key at the row
+  grain** -- even the widest practical composite (`id, cost_type, module,
+  reference, d_date`) leaves thousands of duplicate rows per company. This
+  is why every real legacy sync attempt has failed (`etl.sync_runs` shows 3
+  `FAILED` rows, two refused by `validate_combined_for_full_replace`'s own
+  duplicate-key check doing exactly its job). The legacy schema/validation
+  code is left unmodified (out of scope -- `telemetry_warehouse` stays
+  untouched); `raw_evolution.project_report`/`stg_evolution.project_report`
+  use a load-time surrogate `BIGSERIAL` primary key instead and allow
+  duplicate rows, validated by the separate
+  `validate_project_report_batch_for_platform_load`. See
+  `sql/migrations/011_create_raw_evolution.sql` and
   `sql/sources/evolution/project_reports/validate_source_assumptions.sql`
-  for the read-only checks that confirm or refute it against each live
-  Evolution database.
+  (still useful for the raw type/range/scale checks; its `Id`-uniqueness
+  assumption is now known to be false).
 - Money columns (`credit`, `debit`, `inclusive_amount`, `tax_amount`) are
   `NUMERIC(20, 4)`; `quantity_invoiced` is left unscaled since the source
-  query never casts it.
+  query never casts it. A minority of rows (1,614 GE / 860 TLS) carry more
+  than 4 decimal places in the source and are rounded to 4dp by the
+  extraction query's own `CAST` -- an intentional, pre-existing behavior
+  (not introduced by this migration), immaterial for currency values.
+- `DDate` legitimately extends past the current date on both databases
+  (forward-dated/scheduled transactions) -- not a data error.
+
+## Snapshot semantics
+
+`dbo.vwProjectsReports` is **accumulated history re-extracted in full every
+run** (task classification C): every row ever posted stays in the view (no
+evidence of expiry/archival), but there is no incremental key or change
+cursor, so each run reads the entire view again. The existing **full
+replace** load strategy (atomic `DELETE` + `INSERT` in one transaction, not
+an UPSERT or append) is therefore correct and was kept as-is: a row genuinely
+removed from the source (e.g. a voided/corrected posting) must also
+disappear from PostgreSQL, which an append-only or UPSERT-only strategy
+could never achieve on its own. Verified directly during the migration:
+re-running the identical extract reproduces byte-identical row counts and
+monetary aggregates with no growth (see
+`docs/migration/legacy-to-platform-migration.md#evolution-migration-completed`).
+Per-extraction snapshot history (e.g. an `extracted_at`-partitioned append
+table) would be a useful future enhancement but is out of scope here --
+documented as a possibility, not a commitment.
+
+## `ge_warehouse` platform target
+
+**Status: IMPLEMENTED, opt-in, not scheduled.**
+
+`ge_data_platform.sources.evolution.project_reports` accepts
+`--target {legacy,platform}` (default `legacy` -- current behavior,
+unchanged):
+
+```powershell
+python -m ge_data_platform.sources.evolution.project_reports --target platform
+```
+
+`--target platform`:
+
+- writes into `ge_warehouse` instead of `telemetry_warehouse`, split into
+  two layers rather than legacy's one: `raw_evolution.project_report`
+  (source-faithful, no `business_unit`) and `stg_evolution.project_report`
+  (adds `business_unit`) -- via `PostgresLoader.from_platform_settings` and
+  `replace_evolution_project_reports_platform` in `common/database.py`;
+- reuses the exact same extraction/transform functions as legacy
+  (`extract_all`, and `build_raw`/`add_business_unit_classification`, which
+  together produce byte-identical output to legacy's single-step
+  `build_combined`);
+- skips `etl.sync_runs`/`etl.sync_table_loads` bookkeeping (`ops.pipeline_run`/
+  `ops.table_load` are not yet wired) and skips post-load validation (hardcoded
+  to legacy schema names) -- same precedent as Trackunit/Sendem/EzyTrack;
+- uses `validate_project_report_batch_for_platform_load` instead of legacy's
+  `validate_combined_for_full_replace` (see "Known constraints" above for
+  why they differ).
+
+No Dagster job or schedule passes `--target platform`; it is exercised only
+by manual invocation today. See
+`docs/migration/legacy-to-platform-migration.md#evolution-migration-completed`
+for the first-load and reconciliation results, and
+`scripts/run_evolution_first_load.py`/`scripts/validate_evolution_migration.py`
+for the tooling used.
 
 ## Likely future datasets (PLANNED examples only)
 

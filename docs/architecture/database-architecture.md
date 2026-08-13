@@ -15,12 +15,12 @@ checks against it). For what each layer *means*, see
 | `raw_trackunit` | raw | IMPLEMENTED | 7 tables, populated -- full historical backfill from `telemetry_warehouse` plus live API data (see `docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed`) |
 | `raw_sendem` | raw | IMPLEMENTED | 5 tables, populated -- full historical backfill from `telemetry_warehouse` plus live API data (see `docs/migration/legacy-to-platform-migration.md#sendem-migration`) |
 | `raw_ezytrack` | raw | IMPLEMENTED | 2 tables, populated -- full historical backfill from `telemetry_warehouse` plus live API data (see `docs/migration/legacy-to-platform-migration.md#ezytrack-migration-completed`) |
-| `raw_evolution` | raw | IMPLEMENTED | empty |
+| `raw_evolution` | raw | IMPLEMENTED | 1 table, populated -- first platform load direct from Evolution SQL Server (no legacy data existed to backfill), see `docs/migration/legacy-to-platform-migration.md#evolution-migration-completed` |
 | `raw_fieldops` | raw | IMPLEMENTED | empty |
 | `stg_trackunit` | staging | IMPLEMENTED | 3 tables, populated -- see `docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed` |
 | `stg_sendem` | staging | IMPLEMENTED | 5 tables, populated -- includes legacy `clean.sendem_fact_*_daily` history back to 2026-01-01, see `docs/migration/legacy-to-platform-migration.md#sendem-migration` |
 | `stg_ezytrack` | staging | IMPLEMENTED | 2 tables, populated -- see `docs/migration/legacy-to-platform-migration.md#ezytrack-migration-completed` |
-| `stg_evolution` | staging | IMPLEMENTED | empty |
+| `stg_evolution` | staging | IMPLEMENTED | 1 table, populated -- see `docs/migration/legacy-to-platform-migration.md#evolution-migration-completed` |
 | `stg_fieldops` | staging | IMPLEMENTED | empty |
 | `core` | core | IMPLEMENTED | `core.dim_date` (7,670 rows, 2015-01-01..2035-12-31) only |
 | `mart_fleet` | mart | IMPLEMENTED | empty |
@@ -102,6 +102,30 @@ copy.
 | `raw_ezytrack.trip` | 848 (823 historical + 25 from live-ingestion testing) |
 | `stg_ezytrack.asset` | 55 |
 | `stg_ezytrack.trip` | 848 |
+
+### `raw_evolution` / `stg_evolution` tables
+
+Fourth source migrated -- see
+`docs/migration/legacy-to-platform-migration.md#evolution-migration-completed`
+for the full first-load/validation procedure and results. **First platform
+load, not a historical migration**: `telemetry_warehouse` has never actually
+held any Evolution data (the legacy migration that would create it was
+never applied). Unlike the other three sources, `id` is not a usable row
+key -- `dbo.vwProjectsReports` has no reliable natural key at all, so both
+tables use a load-time surrogate `BIGSERIAL` primary key
+(`project_report_id`) and allow duplicate source rows.
+
+| Table | Row count (dev, after first load) |
+|---|---|
+| `raw_evolution.project_report` | 29,948 (GE 21,582 + TLS 8,366) |
+| `stg_evolution.project_report` | 29,948 |
+
+`stg_evolution.project_report` adds one derived column vs.
+`raw_evolution.project_report`: `business_unit`, classified from
+`company`/`d_date`/`cost_type` (ported verbatim from the source notebook).
+Load strategy is full replace (atomic `DELETE` + `INSERT`), not an UPSERT --
+`dbo.vwProjectsReports` is re-extracted in full every run with no evidenced
+incremental key. See `docs/sources/evolution.md#snapshot-semantics`.
 
 ### `ops` tables
 

@@ -7,9 +7,10 @@ opt-in via `--target platform` -- see `docs/sources/trackunit.md`). Sendem
 ingestion also runs against `ge_warehouse` (`raw_sendem`/`stg_sendem`,
 opt-in via `--target platform` -- see `docs/sources/sendem.md`), and so does
 EzyTrack (`raw_ezytrack`/`stg_ezytrack`, opt-in via `--target platform` --
-see `docs/sources/ezytrack.md`). All three sources skip their bounded
-post-load validation checks for the platform target (hardcoded to legacy
-schema names).
+see `docs/sources/ezytrack.md`) and Evolution (`raw_evolution`/`stg_evolution`,
+opt-in via `--target platform` -- see `docs/sources/evolution.md`). All four
+sources skip their bounded post-load validation checks for the platform
+target (hardcoded to legacy schema names).
 
 ## Counter reset handling
 
@@ -84,6 +85,33 @@ returns `None` against an engine stub that raises if `connect()` is ever
 called. This is now a permanent regression test
 (`tests/ezytrack/test_ezytrack_platform_target.py`), not just a one-time
 manual check.
+
+**Discovered during the Evolution `raw_evolution`/`stg_evolution` migration**
+(see `docs/migration/legacy-to-platform-migration.md#evolution-migration-completed`):
+the frozen legacy `telemetry_migrations/029` and the still-current
+`ge_data_platform.common.database.validate_combined_for_full_replace` both
+assume `dbo.vwProjectsReports`'s `Id` column is a `BIGINT` row identifier and
+that `(company, id)` is a usable natural primary key. Live read-only
+inspection of both GE and TLS Evolution databases disproves this: `Id` is
+`VARCHAR` and takes only 11 distinct values total (a transaction-type/module
+code, mapping 1:1 to `Module`), and even a 5-column composite key leaves
+thousands of duplicate rows per company -- **`dbo.vwProjectsReports` has no
+reliable natural key at the row grain.** This is exactly why every real
+legacy sync attempt has failed: `etl.sync_runs` shows 3 `FAILED` rows for
+`evolution_project_reports` (2026-08-12), two of them refused by
+`validate_combined_for_full_replace`'s own duplicate-key check doing exactly
+its job -- no data was ever corrupted, the safety net worked as designed.
+The frozen legacy migration and legacy validation function were left
+unmodified (`telemetry_warehouse` stays untouched, out of scope); instead,
+`raw_evolution.project_report`/`stg_evolution.project_report` use a
+load-time surrogate `BIGSERIAL` primary key and a new, separate validation
+function, `validate_project_report_batch_for_platform_load`, which enforces
+only the assumptions the source data actually supports and explicitly
+allows duplicate rows. `scripts/validate_evolution_migration.py` reconciles
+row counts, null profiles, and exact `Decimal` monetary aggregates against
+the exact batch captured at load time by `scripts/run_evolution_first_load.py`
+(not a fresh Evolution re-query, which could manufacture a false mismatch
+against a live-changing source).
 
 ## Validation SQL philosophy
 
