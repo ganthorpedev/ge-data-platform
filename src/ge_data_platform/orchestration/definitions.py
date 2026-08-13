@@ -4,8 +4,8 @@ from time import monotonic
 
 import dagster as dg
 
-from orchestration.monitoring import sensors, stale_started_run_cleanup
-from orchestration.runner import (
+from ge_data_platform.orchestration.monitoring import sensors, stale_started_run_cleanup
+from ge_data_platform.orchestration.runner import (
     ACCOUNTS_EVOLUTION_OVERLAP_GROUP,
     EZYTRACK_OVERLAP_GROUP,
     SENDEM_OVERLAP_GROUP,
@@ -36,7 +36,7 @@ def dagster_smoke_test() -> None:
 def sendem_sync_op(context: dg.OpExecutionContext) -> None:
     run_module(
         context,
-        "jobs.sync_sendem",
+        "ge_data_platform.sources.sendem.sync",
         overlap_group=SENDEM_OVERLAP_GROUP,
     )
 
@@ -50,7 +50,7 @@ def sendem_sync() -> None:
 def ezytrack_sync_op(context: dg.OpExecutionContext) -> None:
     run_module(
         context,
-        "jobs.sync_ezytrack",
+        "ge_data_platform.sources.ezytrack.sync",
         overlap_group=EZYTRACK_OVERLAP_GROUP,
     )
 
@@ -64,7 +64,7 @@ def ezytrack_sync() -> None:
 def ezytrack_daily_reconciliation_op(context: dg.OpExecutionContext) -> None:
     run_module(
         context,
-        "jobs.sync_ezytrack",
+        "ge_data_platform.sources.ezytrack.sync",
         ["--reconcile"],
         overlap_group=EZYTRACK_OVERLAP_GROUP,
     )
@@ -80,7 +80,7 @@ def trackunit_intraday_refresh_op(context: dg.OpExecutionContext) -> None:
     """Light, frequent activity-only refresh; enrichment stays daily-only."""
     run_module(
         context,
-        "jobs.sync_trackunit_daily_activity",
+        "ge_data_platform.sources.trackunit.daily_activity",
         ["--rolling-days", "1"],
         overlap_group=TRACKUNIT_OVERLAP_GROUP,
     )
@@ -95,7 +95,7 @@ def trackunit_intraday_refresh() -> None:
 def trackunit_rolling_7_days_op(context: dg.OpExecutionContext) -> None:
     run_module(
         context,
-        "jobs.sync_trackunit_daily_activity",
+        "ge_data_platform.sources.trackunit.daily_activity",
         ["--rolling-days", "7"],
         overlap_group=TRACKUNIT_OVERLAP_GROUP,
     )
@@ -110,7 +110,7 @@ def trackunit_rolling_7_days() -> None:
 def trackunit_location_enrichment_op(context: dg.OpExecutionContext) -> None:
     run_module(
         context,
-        "jobs.sync_trackunit_location_enrichment",
+        "ge_data_platform.sources.trackunit.location",
         overlap_group=TRACKUNIT_OVERLAP_GROUP,
     )
 
@@ -124,13 +124,13 @@ def trackunit_location_enrichment() -> None:
 def trackunit_daily_refresh_op(context: dg.OpExecutionContext) -> None:
     """Hold one lock and one timeout budget across activity plus enrichment."""
     timeout_budget_minutes = get_module_timeout_minutes(
-        "jobs.sync_trackunit_daily_activity"
+        "ge_data_platform.sources.trackunit.daily_activity"
     )
     started_at = monotonic()
     with job_overlap_guard(context, TRACKUNIT_OVERLAP_GROUP):
         run_module(
             context,
-            "jobs.sync_trackunit_daily_activity",
+            "ge_data_platform.sources.trackunit.daily_activity",
             ["--rolling-days", "2"],
             inherited_overlap_group=TRACKUNIT_OVERLAP_GROUP,
             timeout_minutes=timeout_budget_minutes,
@@ -153,7 +153,7 @@ def trackunit_daily_refresh_op(context: dg.OpExecutionContext) -> None:
             )
         run_module(
             context,
-            "jobs.sync_trackunit_location_enrichment",
+            "ge_data_platform.sources.trackunit.location",
             inherited_overlap_group=TRACKUNIT_OVERLAP_GROUP,
             timeout_minutes=remaining_minutes,
         )
@@ -168,7 +168,7 @@ def trackunit_daily_refresh() -> None:
 def accounts_evolution_project_reports_sync_op(context: dg.OpExecutionContext) -> None:
     run_module(
         context,
-        "jobs.accounts.evolution.sync_project_reports",
+        "ge_data_platform.sources.evolution.project_reports",
         overlap_group=ACCOUNTS_EVOLUTION_OVERLAP_GROUP,
     )
 
@@ -191,9 +191,10 @@ defs_jobs = [
     stale_started_run_cleanup,
 ]
 
-# Imported after job construction because orchestration/schedules.py imports
-# these JobDefinition objects.  This preserves the project's established
-# single public Definitions entry point while remaining loadable on 1.13.14.
-from orchestration.schedules import schedules  # noqa: E402
+# Imported after job construction because
+# ge_data_platform/orchestration/schedules.py imports these JobDefinition
+# objects.  This preserves the project's established single public
+# Definitions entry point while remaining loadable on 1.13.14.
+from ge_data_platform.orchestration.schedules import schedules  # noqa: E402
 
 defs = dg.Definitions(jobs=defs_jobs, schedules=schedules, sensors=sensors)

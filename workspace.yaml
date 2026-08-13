@@ -1,9 +1,9 @@
 # Local/dev Dagster workspace, loaded with `dagster -w workspace.yaml ...`.
 # Production continues to load this code location by module
-# (`-m orchestration.definitions`, see README.md and
+# (`-m ge_data_platform.orchestration.definitions`, see README.md and
 # docs/reliability_operations.md); this file exists only so the CLI's
 # `-w workspace.yaml` form also works for ad hoc validation.
 load_from:
   - python_module:
-      module_name: orchestration.definitions
+      module_name: ge_data_platform.orchestration.definitions
       attribute: defs

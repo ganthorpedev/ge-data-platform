@@ -3,19 +3,20 @@
 Provider schedules keep ``default_status=STOPPED`` to preserve this project's
 deployment convention: each must be reviewed and enabled in the Dagster UI.
 The two operational sensors have their own explicit status in
-``orchestration.monitoring``.
+``ge_data_platform.orchestration.monitoring``.
 
 Every provider schedule checks all Dagster jobs in its overlap group, not
-only its own job.  The OS lock in ``orchestration.runner`` and the optional
-Dagster run-tag concurrency rule in ``dagster.yaml.example`` close the race
-after schedule evaluation and protect manual launches too.
+only its own job.  The OS lock in ``ge_data_platform.orchestration.runner``
+and the optional Dagster run-tag concurrency rule in
+``dagster.yaml.example`` close the race after schedule evaluation and
+protect manual launches too.
 """
 
 from collections.abc import Sequence
 
 import dagster as dg
 
-from orchestration.definitions import (
+from ge_data_platform.orchestration.definitions import (
     ezytrack_daily_reconciliation,
     ezytrack_sync,
     sendem_sync,
@@ -24,7 +25,7 @@ from orchestration.definitions import (
     trackunit_intraday_refresh,
     trackunit_rolling_7_days,
 )
-from orchestration.overlap import (
+from ge_data_platform.orchestration.overlap import (
     EZYTRACK_DAGSTER_JOB_NAMES,
     HOUSEKEEPING_DAGSTER_JOB_NAMES,
     SENDEM_DAGSTER_JOB_NAMES,

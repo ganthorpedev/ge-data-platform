@@ -10,7 +10,7 @@ from typing import Any
 
 import requests
 
-from config.settings import EtlOpsSettings, get_etl_ops_settings
+from ge_data_platform.config.settings import EtlOpsSettings, get_etl_ops_settings
 
 
 logger = logging.getLogger(__name__)

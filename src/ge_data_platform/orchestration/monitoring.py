@@ -6,12 +6,13 @@ from datetime import datetime
 import dagster as dg
 from sqlalchemy import text
 
-from config.settings import EtlOpsSettings, get_etl_ops_settings, get_settings
-from loaders.postgres_loader import (
+from ge_data_platform.common.database import (
     PostgresLoader,
     compute_abandoned_cutoff,
 )
-from orchestration.alerts import (
+from ge_data_platform.common.dates import utc_now
+from ge_data_platform.config.settings import EtlOpsSettings, get_etl_ops_settings, get_settings
+from ge_data_platform.orchestration.alerts import (
     alert_due_after_cooldown,
     decode_freshness_cursor,
     encode_freshness_cursor,
@@ -20,11 +21,10 @@ from orchestration.alerts import (
     provider_freshness_targets,
     send_operational_alert,
 )
-from orchestration.overlap import (
+from ge_data_platform.orchestration.overlap import (
     dagster_jobs_for_sync_run,
     find_active_run_jobs,
 )
-from utils.dates import utc_now
 
 
 logger = logging.getLogger(__name__)

@@ -30,8 +30,7 @@ from typing import TextIO
 
 import dagster as dg
 
-from config.settings import load_project_env
-from utils.overlap_lock import (
+from ge_data_platform.common.overlap import (
     ACCOUNTS_EVOLUTION_OVERLAP_GROUP,
     EZYTRACK_OVERLAP_GROUP,
     INHERITED_OVERLAP_GROUP_ENV,
@@ -40,11 +39,12 @@ from utils.overlap_lock import (
     OverlapLockUnavailable,
     provider_overlap_guard,
 )
+from ge_data_platform.config.settings import load_project_env
 
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 DEFAULT_SENDEM_JOB_TIMEOUT_MINUTES = 60
 DEFAULT_EZYTRACK_JOB_TIMEOUT_MINUTES = 60
@@ -56,15 +56,23 @@ MAX_CAPTURED_LINES = 1_000
 MAX_CAPTURED_LINE_CHARS = 4_000
 
 _TIMEOUT_ENV_BY_MODULE_PREFIX: tuple[tuple[str, str, int], ...] = (
-    ("jobs.sync_sendem", "SENDEM_JOB_TIMEOUT_MINUTES", DEFAULT_SENDEM_JOB_TIMEOUT_MINUTES),
-    ("jobs.sync_ezytrack", "EZYTRACK_JOB_TIMEOUT_MINUTES", DEFAULT_EZYTRACK_JOB_TIMEOUT_MINUTES),
     (
-        "jobs.sync_trackunit",
+        "ge_data_platform.sources.sendem.sync",
+        "SENDEM_JOB_TIMEOUT_MINUTES",
+        DEFAULT_SENDEM_JOB_TIMEOUT_MINUTES,
+    ),
+    (
+        "ge_data_platform.sources.ezytrack.sync",
+        "EZYTRACK_JOB_TIMEOUT_MINUTES",
+        DEFAULT_EZYTRACK_JOB_TIMEOUT_MINUTES,
+    ),
+    (
+        "ge_data_platform.sources.trackunit",
         "TRACKUNIT_JOB_TIMEOUT_MINUTES",
         DEFAULT_TRACKUNIT_JOB_TIMEOUT_MINUTES,
     ),
     (
-        "jobs.accounts.evolution.sync_project_reports",
+        "ge_data_platform.sources.evolution.project_reports",
         "ACCOUNTS_EVOLUTION_PROJECT_REPORTS_JOB_TIMEOUT_MINUTES",
         DEFAULT_ACCOUNTS_EVOLUTION_PROJECT_REPORTS_JOB_TIMEOUT_MINUTES,
     ),
