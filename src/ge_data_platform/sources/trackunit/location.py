@@ -1,14 +1,14 @@
 """Trackunit location enrichment V1 -- entry point.
 
 Run with:
-    python -m jobs.sync_trackunit_location_enrichment --date 2026-07-05 --machines 5986
-    python -m jobs.sync_trackunit_location_enrichment --date 2026-07-05 --limit 20
-    python -m jobs.sync_trackunit_location_enrichment --date 2026-07-05
+    python -m ge_data_platform.sources.trackunit.location --date 2026-07-05 --machines 5986
+    python -m ge_data_platform.sources.trackunit.location --date 2026-07-05 --limit 20
+    python -m ge_data_platform.sources.trackunit.location --date 2026-07-05
 
 Reads already-loaded staging.trackunit_daily_activity rows for one
 report_date (this job does not fetch metrics -- run
-jobs/sync_trackunit_daily_activity.py first for the same date), then for
-each asset with start/stop boundaries:
+ge_data_platform.sources.trackunit.daily_activity first for the same date),
+then for each asset with start/stop boundaries:
   1. Fetches AEMP historical Locations for a 48h lookback window ending at
      each boundary, picks the latest point <= the boundary.
   2. Fetches Site History for the asset across the same overall window,
@@ -18,24 +18,25 @@ each asset with start/stop boundaries:
      (report_date, asset_id) -- UPSERT, so rerunning the same date/machines
      updates the same rows rather than duplicating them.
 
-This is completely separate from jobs/sync_trackunit_daily_activity.py: it
-does not call it, does not touch staging.trackunit_daily_activity, and a
-failure here cannot affect the metric ETL's own sync_runs history (this job
-records under source_system="trackunit_location", not "trackunit").
+This is completely separate from ge_data_platform.sources.trackunit.
+daily_activity: it does not call it, does not touch
+staging.trackunit_daily_activity, and a failure here cannot affect the
+metric ETL's own sync_runs history (this job records under
+source_system="trackunit_location", not "trackunit").
 
 Address/zip/city/country are never populated -- see
-transforms/trackunit_location_transform.py's module docstring. Do not add
-reverse geocoding here.
+ge_data_platform.sources.trackunit.location_transform's module docstring.
+Do not add reverse geocoding here.
 
 API safety: one AEMP/Site call at a time, with configurable AEMP pacing and
-bounded retries handled by connectors.trackunit_client. A site name is only
-resolved once per run per distinct site id (cached), not once per asset. A
-site-detail 403 (this account cannot see that specific site) is non-fatal:
-it is logged, the denied site_id is cached so it is never requested again
-this run, and the affected asset's row is marked PARTIAL/SITE_ACCESS_DENIED
-instead of aborting the sync. All other failures (auth-wide 401, database
-errors, invalid responses, exhausted 429/5xx retries) still stop the whole
-run and mark etl.sync_runs FAILED.
+bounded retries handled by ge_data_platform.sources.trackunit.client. A site
+name is only resolved once per run per distinct site id (cached), not once
+per asset. A site-detail 403 (this account cannot see that specific site) is
+non-fatal: it is logged, the denied site_id is cached so it is never
+requested again this run, and the affected asset's row is marked
+PARTIAL/SITE_ACCESS_DENIED instead of aborting the sync. All other failures
+(auth-wide 401, database errors, invalid responses, exhausted 429/5xx
+retries) still stop the whole run and mark etl.sync_runs FAILED.
 """
 
 from __future__ import annotations
@@ -47,10 +48,13 @@ from typing import Any
 
 import pandas as pd
 
-from config.settings import get_settings, get_trackunit_settings
-from connectors.trackunit_client import TrackunitClient, TrackunitSiteAccessDeniedError
-from loaders.postgres_loader import PostgresLoader, finish_sync_run_failed_safe
-from transforms.trackunit_location_transform import (
+from ge_data_platform.common.database import PostgresLoader, finish_sync_run_failed_safe
+from ge_data_platform.common.dates import format_utc_iso, local_today, to_date_key
+from ge_data_platform.common.logging import configure_logging
+from ge_data_platform.common.overlap import TRACKUNIT_OVERLAP_GROUP, provider_job_lock
+from ge_data_platform.config.settings import get_settings, get_trackunit_settings
+from ge_data_platform.sources.trackunit.client import TrackunitClient, TrackunitSiteAccessDeniedError
+from ge_data_platform.sources.trackunit.location_transform import (
     ENRICHMENT_COLUMNS,
     RAW_LOCATION_COLUMNS,
     RAW_SITE_COLUMNS,
@@ -67,9 +71,6 @@ from transforms.trackunit_location_transform import (
     find_active_site_id,
     latest_point_at_or_before,
 )
-from utils.dates import format_utc_iso, local_today, to_date_key
-from utils.logging_config import configure_logging
-from utils.overlap_lock import TRACKUNIT_OVERLAP_GROUP, provider_job_lock
 
 # Sentinel stored in site_cache for a site_id that returned 403 -- lets us
 # skip re-requesting it for the rest of the run without treating it the same
@@ -252,7 +253,10 @@ def run(report_date: date, machines: list[str] | None = None, limit: int | None 
         activity_rows = _fetch_activity_rows(loader, report_date, machines, limit)
         print(f"Found {len(activity_rows)} staging.trackunit_daily_activity row(s) to enrich.")
         if not activity_rows:
-            print("Nothing to enrich for this report_date/machine filter -- has jobs.sync_trackunit_daily_activity run for this date?")
+            print(
+                "Nothing to enrich for this report_date/machine filter -- has "
+                "ge_data_platform.sources.trackunit.daily_activity run for this date?"
+            )
 
         print("Authenticating with Trackunit...")
         client.authenticate()

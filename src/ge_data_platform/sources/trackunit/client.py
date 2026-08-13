@@ -22,7 +22,8 @@ Retry policy (all handled here, so callers never sleep or retry themselves):
 - Transient failures (connection errors, timeouts, HTTP 500/502/503/504):
   up to HTTP_MAX_RETRIES total attempts (default 3) with exponential
   backoff from HTTP_BACKOFF_SECONDS. This client deliberately does NOT use
-  utils.http's adapter-level retries, so retries are never doubled up.
+  ge_data_platform.common.http's adapter-level retries, so retries are never
+  doubled up.
 - Any other non-200 (403 on get_site excepted) raises immediately. Ordinary
   4xx responses are never retried.
 """
@@ -37,7 +38,12 @@ from typing import Any
 
 import requests
 
-from config.settings import HttpSettings, TrackunitSettings, get_http_settings, get_trackunit_settings
+from ge_data_platform.config.settings import (
+    HttpSettings,
+    TrackunitSettings,
+    get_http_settings,
+    get_trackunit_settings,
+)
 
 TRANSIENT_STATUS_CODES = (500, 502, 503, 504)
 

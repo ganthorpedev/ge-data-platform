@@ -2,52 +2,53 @@
 
 Run modes:
     # Exact date
-    python -m jobs.sync_trackunit_daily_activity --date 2026-07-05
+    python -m ge_data_platform.sources.trackunit.daily_activity --date 2026-07-05
 
     # Backfill a range (inclusive)
-    python -m jobs.sync_trackunit_daily_activity --from-date 2026-07-01 --to-date 2026-07-05
+    python -m ge_data_platform.sources.trackunit.daily_activity --from-date 2026-07-01 --to-date 2026-07-05
 
     # Rolling update: last N local (Africa/Harare) days, ending today
-    python -m jobs.sync_trackunit_daily_activity --rolling-days 2
+    python -m ge_data_platform.sources.trackunit.daily_activity --rolling-days 2
 
     # No date arguments -> defaults to --rolling-days 2
-    python -m jobs.sync_trackunit_daily_activity
+    python -m ge_data_platform.sources.trackunit.daily_activity
 
 Other examples:
     # 4-machine validation
-    python -m jobs.sync_trackunit_daily_activity --date 2026-07-01 --machines 2277,3846,3849,4955
+    python -m ge_data_platform.sources.trackunit.daily_activity --date 2026-07-01 --machines 2277,3846,3849,4955
 
     # 20-machine controlled run
-    python -m jobs.sync_trackunit_daily_activity --date 2026-07-05 --limit 20
+    python -m ge_data_platform.sources.trackunit.daily_activity --date 2026-07-05 --limit 20
 
     # Normal daily scheduler run (today plus yesterday for late-arriving data)
-    python -m jobs.sync_trackunit_daily_activity --rolling-days 2
+    python -m ge_data_platform.sources.trackunit.daily_activity --rolling-days 2
 
     # 7-day reconciliation
-    python -m jobs.sync_trackunit_daily_activity --rolling-days 7
+    python -m ge_data_platform.sources.trackunit.daily_activity --rolling-days 7
 
     # Backfill
-    python -m jobs.sync_trackunit_daily_activity --from-date 2026-07-01 --to-date 2026-07-05
+    python -m ge_data_platform.sources.trackunit.daily_activity --from-date 2026-07-01 --to-date 2026-07-05
 
-This orchestrates: fetch (connectors.trackunit_client) -> transform
-(transforms.trackunit_transform) -> load (loaders.postgres_loader), and
-records ONE run in etl.sync_runs / etl.sync_table_loads covering every
-report_date processed in this invocation.
+This orchestrates: fetch (ge_data_platform.sources.trackunit.client) ->
+transform (ge_data_platform.sources.trackunit.transform) -> load
+(ge_data_platform.common.database), and records ONE run in etl.sync_runs /
+etl.sync_table_loads covering every report_date processed in this invocation.
 
 Every date's UTC window is calculated dynamically from the local
 (Africa/Harare, or TRACKUNIT_TIMEZONE) calendar day -- nothing here hardcodes
 a UTC window or a specific date; dates only ever come from CLI arguments or
-"today" at run time. Every load is UPSERT (see loaders.postgres_loader), so
-re-running the same date, range, or rolling window updates existing rows
-rather than duplicating them. Nothing here truncates or deletes rows.
+"today" at run time. Every load is UPSERT (see ge_data_platform.common.
+database), so re-running the same date, range, or rolling window updates
+existing rows rather than duplicating them. Nothing here truncates or
+deletes rows.
 
 V1 API safety: one AEMP call at a time, no parallel requests. Pacing between
-calls and 429 backoff/retry are handled inside connectors.trackunit_client
-(TrackunitClient.get_aemp_series), configured via TrackunitSettings -- this
-job does not sleep or retry itself. Any failure that exhausts those retries
-(or any other non-retryable error) stops the whole run immediately and marks
-etl.sync_runs FAILED -- there is no partial-success mode, even across a
-multi-date backfill/rolling run.
+calls and 429 backoff/retry are handled inside
+ge_data_platform.sources.trackunit.client (TrackunitClient.get_aemp_series),
+configured via TrackunitSettings -- this job does not sleep or retry itself.
+Any failure that exhausts those retries (or any other non-retryable error)
+stops the whole run immediately and marks etl.sync_runs FAILED -- there is
+no partial-success mode, even across a multi-date backfill/rolling run.
 """
 
 from __future__ import annotations
@@ -56,13 +57,17 @@ import argparse
 import logging
 from datetime import date, datetime, timedelta
 
-from config.settings import get_etl_ops_settings, get_settings, get_trackunit_settings
-from connectors.trackunit_client import TrackunitClient
-from loaders.postgres_loader import PostgresLoader, finish_sync_run_failed_safe
-from transforms.trackunit_transform import build_daily_activity_rows, extract_metric_points, local_report_day_to_utc_window
-from utils.dates import local_today, to_date_key
-from utils.logging_config import configure_logging
-from utils.overlap_lock import TRACKUNIT_OVERLAP_GROUP, provider_job_lock
+from ge_data_platform.common.database import PostgresLoader, finish_sync_run_failed_safe
+from ge_data_platform.common.dates import local_today, to_date_key
+from ge_data_platform.common.logging import configure_logging
+from ge_data_platform.common.overlap import TRACKUNIT_OVERLAP_GROUP, provider_job_lock
+from ge_data_platform.config.settings import get_etl_ops_settings, get_settings, get_trackunit_settings
+from ge_data_platform.sources.trackunit.client import TrackunitClient
+from ge_data_platform.sources.trackunit.transform import (
+    build_daily_activity_rows,
+    extract_metric_points,
+    local_report_day_to_utc_window,
+)
 
 SOURCE_SYSTEM = "trackunit"
 JOB_NAME = "trackunit_daily_activity_sync"
@@ -302,22 +307,22 @@ def main() -> None:
         epilog=(
             "Examples:\n"
             "  4-machine validation:\n"
-            "    python -m jobs.sync_trackunit_daily_activity --date 2026-07-01 --machines 2277,3846,3849,4955\n"
+            "    python -m ge_data_platform.sources.trackunit.daily_activity --date 2026-07-01 --machines 2277,3846,3849,4955\n"
             "\n"
             "  20-machine controlled run:\n"
-            "    python -m jobs.sync_trackunit_daily_activity --date 2026-07-05 --limit 20\n"
+            "    python -m ge_data_platform.sources.trackunit.daily_activity --date 2026-07-05 --limit 20\n"
             "\n"
             "  Normal daily scheduler run (today plus yesterday for late-arriving data):\n"
-            "    python -m jobs.sync_trackunit_daily_activity --rolling-days 2\n"
+            "    python -m ge_data_platform.sources.trackunit.daily_activity --rolling-days 2\n"
             "\n"
             "  7-day reconciliation:\n"
-            "    python -m jobs.sync_trackunit_daily_activity --rolling-days 7\n"
+            "    python -m ge_data_platform.sources.trackunit.daily_activity --rolling-days 7\n"
             "\n"
             "  Backfill a range:\n"
-            "    python -m jobs.sync_trackunit_daily_activity --from-date 2026-07-01 --to-date 2026-07-05\n"
+            "    python -m ge_data_platform.sources.trackunit.daily_activity --from-date 2026-07-01 --to-date 2026-07-05\n"
             "\n"
             "  No date argument -> defaults to --rolling-days 2:\n"
-            "    python -m jobs.sync_trackunit_daily_activity\n"
+            "    python -m ge_data_platform.sources.trackunit.daily_activity\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

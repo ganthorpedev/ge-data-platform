@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from utils.dates import local_day_to_utc_window
+from ge_data_platform.common.dates import local_day_to_utc_window
 
 DATA_QUALITY_LIVE = "live"
 DATA_QUALITY_COUNTER_RESET = "COUNTER_RESET"
