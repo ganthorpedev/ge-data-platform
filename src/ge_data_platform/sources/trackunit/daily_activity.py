@@ -61,7 +61,12 @@ from ge_data_platform.common.database import PostgresLoader, finish_sync_run_fai
 from ge_data_platform.common.dates import local_today, to_date_key
 from ge_data_platform.common.logging import configure_logging
 from ge_data_platform.common.overlap import TRACKUNIT_OVERLAP_GROUP, provider_job_lock
-from ge_data_platform.config.settings import get_etl_ops_settings, get_settings, get_trackunit_settings
+from ge_data_platform.config.settings import (
+    get_etl_ops_settings,
+    get_platform_settings,
+    get_settings,
+    get_trackunit_settings,
+)
 from ge_data_platform.sources.trackunit.client import TrackunitClient
 from ge_data_platform.sources.trackunit.transform import (
     build_daily_activity_rows,
@@ -143,6 +148,7 @@ def _sync_one_date(
     timezone: str,
     loader: PostgresLoader,
     sync_run_id: str,
+    target: str = "legacy",
 ) -> tuple[int, int]:
     """Fetch, transform, and load one report_date. Returns (rows_fetched, rows_loaded).
 
@@ -200,7 +206,7 @@ def _sync_one_date(
         dataframes = build_daily_activity_rows(assets, metric_results_by_asset, report_date, timezone)
 
         print(f"Loading data for {report_date} into PostgreSQL...")
-        load_counts = loader.load_trackunit_tables(dataframes, sync_run_id=sync_run_id, provider=SOURCE_SYSTEM)
+        load_counts = loader.load_trackunit_tables(dataframes, sync_run_id=sync_run_id, provider=SOURCE_SYSTEM, target=target)
         for table_name, row_count in load_counts.items():
             print(f"  {table_name}: {row_count} rows")
 
@@ -218,18 +224,32 @@ def run(
     rolling_days_arg: int | None = None,
     limit: int | None = None,
     machines: list[str] | None = None,
+    target: str = "legacy",
 ) -> None:
     """Execute one Trackunit daily-activity sync covering every resolved report_date.
 
+    `target="legacy"` (default) writes to telemetry_warehouse raw.trackunit_*
+    / staging.trackunit_* -- current production behavior, unchanged.
+    `target="platform"` writes to ge_warehouse raw_trackunit.* /
+    stg_trackunit.* instead (see
+    docs/migration/legacy-to-platform-migration.md); sync_run/table_load
+    bookkeeping is skipped for platform target (ops.pipeline_run/
+    ops.table_load are not yet wired -- see
+    docs/operations/pipeline-operations.md) and post-load validation is also
+    skipped (its checks are hardcoded to legacy schema names).
+
     Marks etl.sync_runs SUCCESS only if every report_date's AEMP calls
-    succeeded and loaded cleanly. Any failure (any date, any asset, any
-    metric -- including a 429 that exhausts its retries) marks the whole run
-    FAILED with the error in error_message and re-raises -- there is no
-    partial SUCCESS across a multi-date backfill/rolling run.
+    succeeded and loaded cleanly (legacy target only). Any failure (any
+    date, any asset, any metric -- including a 429 that exhausts its
+    retries) marks the whole run FAILED with the error in error_message and
+    re-raises -- there is no partial SUCCESS across a multi-date backfill/
+    rolling run.
     """
+    if target not in ("legacy", "platform"):
+        raise ValueError(f"target must be 'legacy' or 'platform', got {target!r}")
+
     configure_logging()
     print("Loading settings...")
-    postgres_settings = get_settings()
     trackunit_settings = get_trackunit_settings()
     ops_settings = get_etl_ops_settings()
 
@@ -238,7 +258,21 @@ def run(
     )
     print(f"Report dates ({len(report_dates)}): {[d.isoformat() for d in report_dates]}")
 
-    loader = PostgresLoader(postgres_settings)
+    if target == "platform":
+        platform_settings = get_platform_settings()
+        host = getattr(platform_settings, "postgres_host", "?")
+        port = getattr(platform_settings, "postgres_port", "?")
+        db = getattr(platform_settings, "ge_warehouse_db", "?")
+        print(f"Target: platform (ge_warehouse) -- {host}:{port}/{db} -- schemas raw_trackunit / stg_trackunit")
+        loader = PostgresLoader.from_platform_settings(platform_settings)
+    else:
+        postgres_settings = get_settings()
+        host = getattr(postgres_settings, "postgres_host", "?")
+        port = getattr(postgres_settings, "postgres_port", "?")
+        db = getattr(postgres_settings, "postgres_db", "?")
+        print(f"Target: legacy (telemetry_warehouse) -- {host}:{port}/{db} -- schemas raw / staging")
+        loader = PostgresLoader(postgres_settings)
+
     client = TrackunitClient(trackunit_settings)
 
     print("Starting sync run...")
@@ -272,16 +306,19 @@ def run(
 
         for report_date in report_dates:
             rows_fetched, rows_loaded = _sync_one_date(
-                client, assets, report_date, trackunit_settings.timezone, loader, sync_run_id
+                client, assets, report_date, trackunit_settings.timezone, loader, sync_run_id, target=target
             )
             total_rows_fetched += rows_fetched
             total_rows_loaded += rows_loaded
 
-        loader.run_post_load_validation(
-            SOURCE_SYSTEM,
-            mode=ops_settings.validation_mode,
-            lookback_hours=ops_settings.validation_lookback_hours,
-        )
+        if target == "platform":
+            print("Skipping post-load validation for platform target (checks are hardcoded to legacy schema names).")
+        else:
+            loader.run_post_load_validation(
+                SOURCE_SYSTEM,
+                mode=ops_settings.validation_mode,
+                lookback_hours=ops_settings.validation_lookback_hours,
+            )
 
         loader.finish_sync_run(
             sync_run_id=sync_run_id,
@@ -342,6 +379,17 @@ def main() -> None:
         default=None,
         help="Optional comma-separated list of machine names to restrict to, e.g. 2277,3846,3849,4955",
     )
+    parser.add_argument(
+        "--target",
+        type=str,
+        choices=["legacy", "platform"],
+        default="legacy",
+        help=(
+            "Which database/schemas to write to: 'legacy' (default) writes telemetry_warehouse "
+            "raw.trackunit_*/staging.trackunit_*, unchanged from current behavior. 'platform' writes "
+            "ge_warehouse raw_trackunit.*/stg_trackunit.* -- see docs/migration/legacy-to-platform-migration.md."
+        ),
+    )
     args = parser.parse_args()
 
     machines = [name.strip() for name in args.machines.split(",")] if args.machines else None
@@ -353,6 +401,7 @@ def main() -> None:
         rolling_days_arg=args.rolling_days,
         limit=args.limit,
         machines=machines,
+        target=args.target,
     )
 
 

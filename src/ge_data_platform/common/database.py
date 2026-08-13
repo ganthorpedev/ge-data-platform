@@ -18,7 +18,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-from ge_data_platform.config.settings import Settings
+from ge_data_platform.config.settings import PlatformSettings, Settings
 from ge_data_platform.common.dates import utc_now
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,40 @@ logger = logging.getLogger(__name__)
 # parameters per INSERT, comfortably under psycopg2/PostgreSQL's 65,535
 # parameter limit while still batching far better than row-by-row inserts.
 TO_SQL_CHUNKSIZE = 500
+
+# Trackunit (schema, table) destinations, keyed by logical dataframe role.
+# "legacy" is telemetry_warehouse's raw/staging schemas (unchanged); "platform"
+# is ge_warehouse's raw_trackunit/stg_trackunit schemas (see
+# sql/migrations/005_create_raw_trackunit.sql and 006_create_stg_trackunit.sql).
+# Column shapes are identical between the two -- only names/locations differ.
+_LEGACY_TRACKUNIT_TABLES = {
+    "raw_assets": ("raw", "trackunit_assets"),
+    "raw_operating_hours": ("raw", "trackunit_aemp_operating_hours"),
+    "raw_moving_hours": ("raw", "trackunit_aemp_moving_hours"),
+    "raw_distance": ("raw", "trackunit_aemp_distance"),
+    "staging_dim_assets": ("staging", "trackunit_dim_assets"),
+    "staging_daily_activity": ("staging", "trackunit_daily_activity"),
+}
+_PLATFORM_TRACKUNIT_TABLES = {
+    "raw_assets": ("raw_trackunit", "asset"),
+    "raw_operating_hours": ("raw_trackunit", "aemp_operating_hour"),
+    "raw_moving_hours": ("raw_trackunit", "aemp_moving_hour"),
+    "raw_distance": ("raw_trackunit", "aemp_distance"),
+    "staging_dim_assets": ("stg_trackunit", "asset"),
+    "staging_daily_activity": ("stg_trackunit", "daily_activity"),
+}
+_LEGACY_TRACKUNIT_LOCATION_TABLES = {
+    "raw_locations": ("raw", "trackunit_aemp_locations"),
+    "raw_site_history": ("raw", "trackunit_site_history"),
+    "raw_sites": ("raw", "trackunit_sites"),
+    "staging_location_enrichment": ("staging", "trackunit_location_enrichment"),
+}
+_PLATFORM_TRACKUNIT_LOCATION_TABLES = {
+    "raw_locations": ("raw_trackunit", "aemp_location"),
+    "raw_site_history": ("raw_trackunit", "site_history"),
+    "raw_sites": ("raw_trackunit", "site"),
+    "staging_location_enrichment": ("stg_trackunit", "location_enrichment"),
+}
 
 # These checks are deliberately the bounded, post-load subset of the existing
 # sql/*validate*.sql packs. The full packs remain available for manual
@@ -284,27 +318,36 @@ def finish_sync_run_failed_safe(loader: "PostgresLoader", sync_run_id: str, erro
 
 
 class PostgresLoader:
-    """Loads provider dataframes into the legacy telemetry_warehouse PostgreSQL database.
+    """Loads provider dataframes into a PostgreSQL database.
 
-    Unchanged by the introduction of the ge_warehouse platform database (see
-    ge_data_platform.config.settings.get_platform_settings /
-    docs/ge_warehouse_architecture.md) -- this class still targets whatever
-    `Settings.postgres_db` resolves to (telemetry_warehouse today), and no
-    ingestion pipeline has been ported to write to ge_warehouse yet.
+    Defaults to whatever `Settings.postgres_db` resolves to (telemetry_warehouse
+    today) when constructed directly with `PostgresLoader(settings)` -- every
+    existing call site (Sendem, EzyTrack, Evolution, and Trackunit's legacy
+    target) is unaffected by the platform-target support added below. Use
+    `PostgresLoader.from_platform_settings()` to target ge_warehouse instead
+    -- see docs/migration/legacy-to-platform-migration.md.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, database: str | None = None, enable_sync_tracking: bool = True) -> None:
         """Create and store a SQLAlchemy engine from `settings`.
 
         pool_pre_ping revalidates pooled connections before use (the
         Trackunit job can spend hours fetching before it writes, easily
         outliving an idle connection); pool_recycle=1800 proactively replaces
         connections older than 30 minutes.
+
+        `database` overrides `settings.postgres_db` when given (used by
+        `from_platform_settings` to target ge_warehouse without needing a
+        second settings dataclass). `enable_sync_tracking` gates all
+        etl.sync_runs/etl.sync_table_loads bookkeeping -- see
+        `from_platform_settings` for why it defaults to False there.
         """
+        self.enable_sync_tracking = enable_sync_tracking
+        db_name = database if database is not None else settings.postgres_db
         password = quote_plus(settings.postgres_password)
         connection_string = (
             f"postgresql+psycopg2://{settings.postgres_user}:{password}"
-            f"@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}"
+            f"@{settings.postgres_host}:{settings.postgres_port}/{db_name}"
         )
         self.engine: Engine = create_engine(
             connection_string,
@@ -312,6 +355,22 @@ class PostgresLoader:
             pool_recycle=1800,
             pool_timeout=settings.postgres_pool_timeout_seconds,
         )
+
+    @classmethod
+    def from_platform_settings(cls, platform_settings: PlatformSettings) -> "PostgresLoader":
+        """Build a loader targeting the ge_warehouse platform database.
+
+        Reuses the shared Postgres host/port/user/password credentials (see
+        PlatformSettings) with `database` overridden to
+        `platform_settings.ge_warehouse_db`. `enable_sync_tracking` is always
+        False here: ge_warehouse's ops.pipeline_run/ops.table_load tables
+        (the platform equivalents of legacy etl.sync_runs/
+        etl.sync_table_loads) are not yet wired into this loader -- see
+        docs/operations/pipeline-operations.md "ops metadata wiring status".
+        start_sync_run still returns a locally-generated id (nothing is
+        persisted); start_table_load/finish_table_load become no-ops.
+        """
+        return cls(platform_settings, database=platform_settings.ge_warehouse_db, enable_sync_tracking=False)
 
     def test_connection(self) -> None:
         """Run a trivial query and print the connected database and user."""
@@ -420,8 +479,17 @@ class PostgresLoader:
         schema: str,
         table: str,
         rows_input: int,
-    ) -> int:
-        """Insert a STARTED row into etl.sync_table_loads and return its id."""
+    ) -> int | None:
+        """Insert a STARTED row into etl.sync_table_loads and return its id.
+
+        Returns None if `enable_sync_tracking` is False -- see
+        `start_sync_run`. `_run_load_plan` treats a None load_id exactly
+        like "no sync_run_id was given": `finish_table_load` is never called
+        for it.
+        """
+        if not self.enable_sync_tracking:
+            return None
+
         statement = text("""
             INSERT INTO etl.sync_table_loads
                 (sync_run_id, provider, schema_name, table_name, rows_input, started_at, status)
@@ -451,7 +519,16 @@ class PostgresLoader:
         rows_loaded: int = 0,
         error_message: str | None = None,
     ) -> None:
-        """Update an etl.sync_table_loads row with its final status and counts."""
+        """Update an etl.sync_table_loads row with its final status and counts.
+
+        No-op if `enable_sync_tracking` is False -- see `start_sync_run`.
+        `_run_load_plan` never calls this directly when tracking is disabled
+        (start_table_load already returned None), but this guard makes the
+        method safe to call on its own too.
+        """
+        if not self.enable_sync_tracking:
+            return
+
         statement = text("""
             UPDATE etl.sync_table_loads
             SET status = :status,
@@ -611,6 +688,7 @@ class PostgresLoader:
         dataframes: dict[str, pd.DataFrame],
         sync_run_id: str | None = None,
         provider: str = "trackunit",
+        target: str = "legacy",
     ) -> dict[str, int]:
         """Load all Trackunit raw and staging tables from the given dataframes.
 
@@ -620,8 +698,16 @@ class PostgresLoader:
         transforms.trackunit_transform.build_daily_activity_rows()). Raises
         `ValueError` if any of these keys are missing.
 
+        `target` selects which schema/table names to write to: "legacy"
+        (default, unchanged behavior) writes raw.trackunit_* /
+        staging.trackunit_*; "platform" writes raw_trackunit.* /
+        stg_trackunit.* (see sql/migrations/005_create_raw_trackunit.sql and
+        006_create_stg_trackunit.sql). The column shapes are identical
+        either way -- only the destination schema/table names differ.
+
         If `sync_run_id` is given, each table load is separately recorded in
-        etl.sync_table_loads. See _run_load_plan for details.
+        etl.sync_table_loads (legacy target only -- see
+        `from_platform_settings`). See _run_load_plan for details.
 
         Returns a dict of "schema.table" -> rows loaded.
         """
@@ -636,21 +722,19 @@ class PostgresLoader:
         missing_keys = [key for key in required_keys if key not in dataframes]
         if missing_keys:
             raise ValueError(f"Missing required Trackunit dataframe keys: {missing_keys}")
+        if target not in ("legacy", "platform"):
+            raise ValueError(f"target must be 'legacy' or 'platform', got {target!r}")
 
         metric_conflict_columns = ["asset_id", "metric_timestamp_utc", "metric_name"]
+        tables = _PLATFORM_TRACKUNIT_TABLES if target == "platform" else _LEGACY_TRACKUNIT_TABLES
 
         load_plan = [
-            ("raw", "trackunit_assets", dataframes["raw_assets_df"], ["asset_id"]),
-            ("raw", "trackunit_aemp_operating_hours", dataframes["raw_operating_hours_df"], metric_conflict_columns),
-            ("raw", "trackunit_aemp_moving_hours", dataframes["raw_moving_hours_df"], metric_conflict_columns),
-            ("raw", "trackunit_aemp_distance", dataframes["raw_distance_df"], metric_conflict_columns),
-            ("staging", "trackunit_dim_assets", dataframes["dim_assets_df"], ["asset_id"]),
-            (
-                "staging",
-                "trackunit_daily_activity",
-                dataframes["daily_activity_df"],
-                ["report_date", "asset_id"],
-            ),
+            (*tables["raw_assets"], dataframes["raw_assets_df"], ["asset_id"]),
+            (*tables["raw_operating_hours"], dataframes["raw_operating_hours_df"], metric_conflict_columns),
+            (*tables["raw_moving_hours"], dataframes["raw_moving_hours_df"], metric_conflict_columns),
+            (*tables["raw_distance"], dataframes["raw_distance_df"], metric_conflict_columns),
+            (*tables["staging_dim_assets"], dataframes["dim_assets_df"], ["asset_id"]),
+            (*tables["staging_daily_activity"], dataframes["daily_activity_df"], ["report_date", "asset_id"]),
         ]
 
         return self._run_load_plan(load_plan, sync_run_id, provider)
@@ -660,19 +744,23 @@ class PostgresLoader:
         dataframes: dict[str, pd.DataFrame],
         sync_run_id: str | None = None,
         provider: str = "trackunit_location",
+        target: str = "legacy",
     ) -> dict[str, int]:
         """Load Trackunit location-enrichment raw and staging tables.
 
-        Separate from load_trackunit_tables (the working metric ETL) --
-        this only ever touches raw.trackunit_aemp_locations,
-        raw.trackunit_site_history, raw.trackunit_sites, and
-        staging.trackunit_location_enrichment. `dataframes` is expected to
+        Separate from load_trackunit_tables (the working metric ETL). Legacy
+        target touches raw.trackunit_aemp_locations, raw.trackunit_site_history,
+        raw.trackunit_sites, and staging.trackunit_location_enrichment;
+        platform target touches raw_trackunit.aemp_location,
+        raw_trackunit.site_history, raw_trackunit.site, and
+        stg_trackunit.location_enrichment. `dataframes` is expected to
         contain exactly: raw_locations_df, raw_site_history_df, raw_sites_df,
         enrichment_df (as produced by jobs/sync_trackunit_location_enrichment.py).
         Raises `ValueError` if any of these keys are missing.
 
         If `sync_run_id` is given, each table load is separately recorded in
-        etl.sync_table_loads. See _run_load_plan for details.
+        etl.sync_table_loads (legacy target only). See _run_load_plan for
+        details.
 
         Returns a dict of "schema.table" -> rows loaded.
         """
@@ -680,17 +768,16 @@ class PostgresLoader:
         missing_keys = [key for key in required_keys if key not in dataframes]
         if missing_keys:
             raise ValueError(f"Missing required Trackunit location enrichment dataframe keys: {missing_keys}")
+        if target not in ("legacy", "platform"):
+            raise ValueError(f"target must be 'legacy' or 'platform', got {target!r}")
+
+        tables = _PLATFORM_TRACKUNIT_LOCATION_TABLES if target == "platform" else _LEGACY_TRACKUNIT_LOCATION_TABLES
 
         load_plan = [
-            ("raw", "trackunit_aemp_locations", dataframes["raw_locations_df"], ["asset_id", "location_timestamp_utc"]),
-            ("raw", "trackunit_site_history", dataframes["raw_site_history_df"], ["asset_id", "site_id", "entered_at"]),
-            ("raw", "trackunit_sites", dataframes["raw_sites_df"], ["site_id"]),
-            (
-                "staging",
-                "trackunit_location_enrichment",
-                dataframes["enrichment_df"],
-                ["report_date", "asset_id"],
-            ),
+            (*tables["raw_locations"], dataframes["raw_locations_df"], ["asset_id", "location_timestamp_utc"]),
+            (*tables["raw_site_history"], dataframes["raw_site_history_df"], ["asset_id", "site_id", "entered_at"]),
+            (*tables["raw_sites"], dataframes["raw_sites_df"], ["site_id"]),
+            (*tables["staging_location_enrichment"], dataframes["enrichment_df"], ["report_date", "asset_id"]),
         ]
 
         return self._run_load_plan(load_plan, sync_run_id, provider)
@@ -826,8 +913,15 @@ class PostgresLoader:
         start_date: int | None,
         end_date: int | None,
     ) -> str:
-        """Insert a STARTED row into etl.sync_runs and return the new sync_run_id."""
+        """Insert a STARTED row into etl.sync_runs and return the new sync_run_id.
+
+        If `enable_sync_tracking` is False (the platform-target default --
+        see `from_platform_settings`), only generates and returns the id;
+        etl.sync_runs does not exist in ge_warehouse so no INSERT is issued.
+        """
         sync_run_id = str(uuid.uuid4())
+        if not self.enable_sync_tracking:
+            return sync_run_id
 
         statement = text("""
             INSERT INTO etl.sync_runs (sync_run_id, source_system, job_name, start_date, end_date, status)
@@ -856,7 +950,13 @@ class PostgresLoader:
         rows_loaded: int = 0,
         error_message: str | None = None,
     ) -> None:
-        """Update an etl.sync_runs row with its final status and counts."""
+        """Update an etl.sync_runs row with its final status and counts.
+
+        No-op if `enable_sync_tracking` is False -- see `start_sync_run`.
+        """
+        if not self.enable_sync_tracking:
+            return
+
         statement = text("""
             UPDATE etl.sync_runs
             SET status = :status,

@@ -52,7 +52,7 @@ from ge_data_platform.common.database import PostgresLoader, finish_sync_run_fai
 from ge_data_platform.common.dates import format_utc_iso, local_today, to_date_key
 from ge_data_platform.common.logging import configure_logging
 from ge_data_platform.common.overlap import TRACKUNIT_OVERLAP_GROUP, provider_job_lock
-from ge_data_platform.config.settings import get_settings, get_trackunit_settings
+from ge_data_platform.config.settings import get_platform_settings, get_settings, get_trackunit_settings
 from ge_data_platform.sources.trackunit.client import TrackunitClient, TrackunitSiteAccessDeniedError
 from ge_data_platform.sources.trackunit.location_transform import (
     ENRICHMENT_COLUMNS,
@@ -95,11 +95,14 @@ def _fmt_utc(dt) -> str:
     return format_utc_iso(dt)
 
 
-def _fetch_activity_rows(loader: PostgresLoader, report_date: date, machines: list[str] | None, limit: int | None) -> list[dict[str, Any]]:
+def _fetch_activity_rows(
+    loader: PostgresLoader, report_date: date, machines: list[str] | None, limit: int | None, target: str = "legacy"
+) -> list[dict[str, Any]]:
     """Read the already-loaded daily-activity rows this job will enrich."""
     from sqlalchemy import text
 
-    query = "SELECT asset_id, machine, pin, start_time_utc, stop_time_utc FROM staging.trackunit_daily_activity WHERE report_date = :report_date"
+    daily_activity_table = "stg_trackunit.daily_activity" if target == "platform" else "staging.trackunit_daily_activity"
+    query = f"SELECT asset_id, machine, pin, start_time_utc, stop_time_utc FROM {daily_activity_table} WHERE report_date = :report_date"
     params: dict[str, Any] = {"report_date": report_date}
 
     if machines:
@@ -228,14 +231,39 @@ def _enrich_one_asset(
 
 
 @provider_job_lock(TRACKUNIT_OVERLAP_GROUP)
-def run(report_date: date, machines: list[str] | None = None, limit: int | None = None) -> None:
-    """Execute one Trackunit location-enrichment run for `report_date`."""
+def run(
+    report_date: date, machines: list[str] | None = None, limit: int | None = None, target: str = "legacy"
+) -> None:
+    """Execute one Trackunit location-enrichment run for `report_date`.
+
+    `target="legacy"` (default) reads/writes telemetry_warehouse raw/staging
+    schemas -- unchanged. `target="platform"` reads/writes ge_warehouse
+    raw_trackunit/stg_trackunit schemas instead -- see
+    docs/migration/legacy-to-platform-migration.md. Sync-run bookkeeping is
+    skipped for platform target (see PostgresLoader.from_platform_settings).
+    """
+    if target not in ("legacy", "platform"):
+        raise ValueError(f"target must be 'legacy' or 'platform', got {target!r}")
+
     configure_logging()
     print("Loading settings...")
-    postgres_settings = get_settings()
     trackunit_settings = get_trackunit_settings()
 
-    loader = PostgresLoader(postgres_settings)
+    if target == "platform":
+        platform_settings = get_platform_settings()
+        host = getattr(platform_settings, "postgres_host", "?")
+        port = getattr(platform_settings, "postgres_port", "?")
+        db = getattr(platform_settings, "ge_warehouse_db", "?")
+        print(f"Target: platform (ge_warehouse) -- {host}:{port}/{db} -- schemas raw_trackunit / stg_trackunit")
+        loader = PostgresLoader.from_platform_settings(platform_settings)
+    else:
+        postgres_settings = get_settings()
+        host = getattr(postgres_settings, "postgres_host", "?")
+        port = getattr(postgres_settings, "postgres_port", "?")
+        db = getattr(postgres_settings, "postgres_db", "?")
+        print(f"Target: legacy (telemetry_warehouse) -- {host}:{port}/{db} -- schemas raw / staging")
+        loader = PostgresLoader(postgres_settings)
+
     client = TrackunitClient(trackunit_settings)
 
     print(f"Report date: {report_date} ({trackunit_settings.timezone})")
@@ -250,7 +278,7 @@ def run(report_date: date, machines: list[str] | None = None, limit: int | None 
     print(f"sync_run_id: {sync_run_id}")
 
     try:
-        activity_rows = _fetch_activity_rows(loader, report_date, machines, limit)
+        activity_rows = _fetch_activity_rows(loader, report_date, machines, limit, target)
         print(f"Found {len(activity_rows)} staging.trackunit_daily_activity row(s) to enrich.")
         if not activity_rows:
             print(
@@ -314,7 +342,9 @@ def run(report_date: date, machines: list[str] | None = None, limit: int | None 
         }
 
         print("Loading data into PostgreSQL...")
-        load_counts = loader.load_trackunit_location_enrichment(dataframes, sync_run_id=sync_run_id, provider=SOURCE_SYSTEM)
+        load_counts = loader.load_trackunit_location_enrichment(
+            dataframes, sync_run_id=sync_run_id, provider=SOURCE_SYSTEM, target=target
+        )
         for table_name, row_count in load_counts.items():
             print(f"  {table_name}: {row_count} rows")
 
@@ -341,6 +371,17 @@ def main() -> None:
         default=None,
         help="Optional comma-separated list of machine names to restrict to, e.g. 2277,3846,5986",
     )
+    parser.add_argument(
+        "--target",
+        type=str,
+        choices=["legacy", "platform"],
+        default="legacy",
+        help=(
+            "Which database/schemas to read/write: 'legacy' (default) reads/writes telemetry_warehouse "
+            "raw.trackunit_*/staging.trackunit_*, unchanged from current behavior. 'platform' reads/writes "
+            "ge_warehouse raw_trackunit.*/stg_trackunit.* -- see docs/migration/legacy-to-platform-migration.md."
+        ),
+    )
     args = parser.parse_args()
 
     trackunit_settings = get_trackunit_settings()
@@ -352,7 +393,7 @@ def main() -> None:
 
     machines = [name.strip() for name in args.machines.split(",")] if args.machines else None
 
-    run(report_date=report_date, machines=machines, limit=args.limit)
+    run(report_date=report_date, machines=machines, limit=args.limit, target=args.target)
 
 
 if __name__ == "__main__":
