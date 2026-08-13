@@ -20,6 +20,8 @@ def test_discover_migrations_finds_real_baseline_files_in_order() -> None:
         "002_create_ops_metadata.sql",
         "003_create_platform_roles.sql",
         "004_create_core_dim_date.sql",
+        "005_create_raw_trackunit.sql",
+        "006_create_stg_trackunit.sql",
     ]
 
 
