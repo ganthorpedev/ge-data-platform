@@ -4,7 +4,7 @@
 -- Lives in the shared telemetry_warehouse schemas (raw/staging/warehouse/etl),
 -- the same schemas Sendem and EzyTrack use. Column shapes are taken directly
 -- from the proven exploration notebook
--- (Manitou/manitou_trackunit_exploration.ipynb) and transforms/trackunit_transform.py.
+-- (Manitou/manitou_trackunit_exploration.ipynb) and ge_data_platform/sources/trackunit/transform.py.
 --
 -- asset_id/pin/serial columns are TEXT, not BIGINT/UUID: Trackunit asset ids
 -- are UUID-formatted strings (e.g. "00000000-0000-0000-0000-000000829017")
@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS staging.trackunit_dim_assets (
 -- staging.trackunit_daily_activity
 -- One row per (report_date, asset_id): the proven Activity Report
 -- calculation (work day / operating hours / active driving / distance).
--- See transforms/trackunit_transform.py:build_daily_activity_rows().
+-- See ge_data_platform/sources/trackunit/transform.py:build_daily_activity_rows().
 --
 -- A machine with no operating-hours and no moving-hours points for the day
 -- gets a valid zero row (work_day_minutes/operating_minutes/

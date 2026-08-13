@@ -1,7 +1,7 @@
 -- Accounts/Evolution Project Reports raw table, derived directly from:
---   transforms/accounts/evolution/project_reports_transform.py  (exact
+--   ge_data_platform/sources/evolution/project_reports.py  (exact
 --     combined DataFrame columns produced, including business_unit)
---   loaders/postgres_loader.py replace_accounts_evolution_project_reports
+--   ge_data_platform/common/database.py replace_accounts_evolution_project_reports
 --     (schema.table name and the (company, id) primary key it stages and
 --     atomically replaces into on every run -- this is a full-refresh
 --     load, not an upsert, so a row missing from a later extract does not

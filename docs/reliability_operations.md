@@ -1,22 +1,27 @@
 # Reliability operations runbook
 
 This runbook covers deployment, scheduling, recovery, and diagnosis for the
-Sendem, EzyTrack, and Trackunit reliability hardening. Commands target the
-production Windows installation at
-`C:\Local Warehouse\Telemetry\telemetry-etl` and assume PowerShell unless noted.
+Sendem, EzyTrack, and Trackunit reliability hardening. It assumes PowerShell
+unless noted.
+
+> Carried over from the flat `telemetry_etl` project during the
+> `ge_data_platform` package restructure. Module invocations below already
+> reflect the new `ge_data_platform.*` paths; the production installation
+> path itself (still `C:\Local Warehouse\Telemetry\telemetry-etl` today) is
+> a separate, later cutover and is not changed by this restructure.
 
 ## Production deployment order
 
 1. Stop the telemetry schedules and sensors in Dagster; let any active provider
    subprocess finish or terminate it through Dagster before replacing files.
 2. Back up the database according to the existing production procedure, deploy
-   the project files, and run `python -m pip install -r requirements.txt` with
+   the project files, and run `python -m pip install -e . --no-deps` with
    the Python 3.13 installation used by the Windows SYSTEM services.
 3. Merge new keys from `.env.example` into the canonical project-root `.env`.
    Keep credentials out of source control and ensure the SYSTEM account can read
    the file. Ensure SYSTEM and the operators who run manual recovery commands
-   can create and modify project-root `.telemetry_etl_locks` so both execution
-   paths contend on the same OS lock.
+   can create and modify project-root `.ge_data_platform_locks` so both
+   execution paths contend on the same OS lock.
 4. Apply migrations 027 and 028 in order, then run the offline tests, CLI help
    checks, and Dagster definition listings documented below.
 5. Keep run monitoring enabled in the external `DAGSTER_HOME\dagster.yaml`, then
@@ -128,7 +133,7 @@ they are not part of any current load plan.
 
 ## EzyTrack gap recovery
 
-A normal `python -m jobs.sync_ezytrack` run finds the newest successful
+A normal `python -m ge_data_platform.sources.ezytrack.sync` run finds the newest successful
 EzyTrack row in `etl.sync_runs`. The current schema uses that run's
 `started_at` timestamp as the window-end cursor because the fetch window is
 anchored immediately before the row is inserted. The next UTC half-open window
@@ -186,12 +191,12 @@ Dagster launches, and the production configuration example adds a run-tag
 concurrency limit for Trackunit. Both direct Trackunit CLI entry points
 acquire that same cross-process lock, so a recovery command also refuses to
 start while Trackunit activity or enrichment is running. The retained lock
-files live under project-root `.telemetry_etl_locks`; only the OS lock on an
+files live under project-root `.ge_data_platform_locks`; only the OS lock on an
 open handle is authoritative, so a crash cannot leave a permanent logical
 lock.
 
 The repository exports these ten Dagster jobs through
-`orchestration.definitions`: `dagster_smoke_test`, `sendem_sync`,
+`ge_data_platform.orchestration.definitions`: `dagster_smoke_test`, `sendem_sync`,
 `ezytrack_sync`, `ezytrack_daily_reconciliation`, `trackunit_daily_refresh`,
 `trackunit_intraday_refresh`, `trackunit_rolling_7_days`,
 `trackunit_location_enrichment`, `accounts_evolution_project_reports_sync`,
@@ -201,11 +206,11 @@ even when they do not have their own schedule.
 Load and inspect the code location before enabling anything:
 
 ```powershell
-python -c "from orchestration.definitions import defs; defs.get_repository_def(); print('Dagster definitions loaded')"
+python -c "from ge_data_platform.orchestration.definitions import defs; defs.get_repository_def(); print('Dagster definitions loaded')"
 $env:DAGSTER_HOME = 'C:\Local Warehouse\Telemetry\dagster_home'
-dagster job list -m orchestration.definitions
-dagster schedule list -m orchestration.definitions
-dagster sensor list -m orchestration.definitions
+dagster job list -m ge_data_platform.orchestration.definitions
+dagster schedule list -m ge_data_platform.orchestration.definitions
+dagster sensor list -m ge_data_platform.orchestration.definitions
 ```
 
 The lists must contain only the expected schedules and sensors above. Start the
@@ -361,7 +366,7 @@ The normal window still comes from `SYNC_LOOKBACK_DAYS`. For a reviewed recovery
 window, the CLI override takes precedence for that invocation:
 
 ```powershell
-python -m jobs.sync_sendem --lookback-days 14
+python -m ge_data_platform.sources.sendem.sync --lookback-days 14
 ```
 
 ### EzyTrack
@@ -370,7 +375,7 @@ Use the normal command to continue from the newest successful cursor, up to the
 configured catch-up cap:
 
 ```powershell
-python -m jobs.sync_ezytrack
+python -m ge_data_platform.sources.ezytrack.sync
 ```
 
 Use reconciliation when the success cursor is unsuitable or the gap predates
@@ -378,7 +383,7 @@ the cap. Review provider cost/rate limits before increasing a long window:
 
 ```powershell
 $env:EZYTRACK_RECONCILIATION_LOOKBACK_HOURS = '72'
-python -m jobs.sync_ezytrack --reconcile
+python -m ge_data_platform.sources.ezytrack.sync --reconcile
 ```
 
 An environment assignment in the current PowerShell session overrides `.env`.
@@ -391,16 +396,16 @@ Recover the smallest known date or inclusive range. Report dates are local
 `TRACKUNIT_TIMEZONE` calendar dates; API windows are converted to UTC.
 
 ```powershell
-python -m jobs.sync_trackunit_daily_activity --date 2026-08-02
-python -m jobs.sync_trackunit_daily_activity --from-date 2026-07-27 --to-date 2026-08-02
-python -m jobs.sync_trackunit_daily_activity --rolling-days 7
+python -m ge_data_platform.sources.trackunit.daily_activity --date 2026-08-02
+python -m ge_data_platform.sources.trackunit.daily_activity --from-date 2026-07-27 --to-date 2026-08-02
+python -m ge_data_platform.sources.trackunit.daily_activity --rolling-days 7
 ```
 
 If location enrichment is required, run it after activity succeeds for each
 date:
 
 ```powershell
-python -m jobs.sync_trackunit_location_enrichment --date 2026-08-02
+python -m ge_data_platform.sources.trackunit.location --date 2026-08-02
 ```
 
 `--machines` and `--limit` are diagnostic/smoke-test filters, not a replacement
@@ -594,14 +599,14 @@ Run the full offline suite and all required CLI parser checks before deployment:
 
 ```powershell
 python -m pytest
-python -m jobs.sync_sendem --help
-python -m jobs.sync_ezytrack --help
-python -m jobs.sync_trackunit_daily_activity --help
-python -c "from orchestration.definitions import defs; defs.get_repository_def(); print('Dagster definitions loaded')"
+python -m ge_data_platform.sources.sendem.sync --help
+python -m ge_data_platform.sources.ezytrack.sync --help
+python -m ge_data_platform.sources.trackunit.daily_activity --help
+python -c "from ge_data_platform.orchestration.definitions import defs; defs.get_repository_def(); print('Dagster definitions loaded')"
 $env:DAGSTER_HOME = 'C:\Local Warehouse\Telemetry\dagster_home'
-dagster job list -m orchestration.definitions
-dagster schedule list -m orchestration.definitions
-dagster sensor list -m orchestration.definitions
+dagster job list -m ge_data_platform.orchestration.definitions
+dagster schedule list -m ge_data_platform.orchestration.definitions
+dagster sensor list -m ge_data_platform.orchestration.definitions
 ```
 
 The focused tests mock API calls and sleep functions. They cover Trackunit 401,
@@ -620,13 +625,13 @@ while its Dagster schedule is stopped.
 Use the smallest meaningful windows:
 
 ```powershell
-python -m jobs.sync_sendem --lookback-days 1
+python -m ge_data_platform.sources.sendem.sync --lookback-days 1
 
 $env:EZYTRACK_RECONCILIATION_LOOKBACK_HOURS = '1'
-python -m jobs.sync_ezytrack --reconcile
+python -m ge_data_platform.sources.ezytrack.sync --reconcile
 
-python -m jobs.sync_trackunit_daily_activity --date 2026-08-02 --limit 1
-python -m jobs.sync_trackunit_location_enrichment --date 2026-08-02 --limit 1
+python -m ge_data_platform.sources.trackunit.daily_activity --date 2026-08-02 --limit 1
+python -m ge_data_platform.sources.trackunit.location --date 2026-08-02 --limit 1
 ```
 
 Choose a known safe Trackunit date instead of copying the example blindly.

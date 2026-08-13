@@ -35,7 +35,7 @@ FROM staging.sendem_dim_assets;
 --    Clean site master view.
 --    group_id is intentionally omitted: staging.sendem_dim_sites has no
 --    group_id column, because the Sendem sites dimension endpoint does not
---    return a GroupId field (confirmed in transforms/sendem_transform.py and
+--    return a GroupId field (confirmed in ge_data_platform/sources/sendem/transform.py and
 --    the applied schema in 001_create_sendem_schema.sql).
 -- =============================================================================
 

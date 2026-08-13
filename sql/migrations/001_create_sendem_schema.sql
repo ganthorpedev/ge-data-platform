@@ -1,12 +1,12 @@
 -- Sendem/MiX schema, derived directly from the current production code:
---   transforms/sendem_transform.py  (exact DataFrame columns produced)
---   loaders/postgres_loader.py      (exact schema.table names and conflict keys)
+--   ge_data_platform/sources/sendem/transform.py  (exact DataFrame columns produced)
+--   ge_data_platform/common/database.py      (exact schema.table names and conflict keys)
 --
 -- Rerunnable: safe to execute against an empty or partially-created database.
 --
 -- NOTE ON DIVERGENCE FROM THE OLD DISCOVERY-NOTEBOOK SCHEMA:
 --   1. sendem_assets / sendem_dim_assets now include site_id.
---      transforms/sendem_transform.py's to_dataframe() does a raw
+--      ge_data_platform/sources/sendem/transform.py's to_dataframe() does a raw
 --      pd.json_normalize() for assets_df with no column selection, so
 --      site_id (returned by the Sendem API on the assets dimension) is
 --      still present when assets_df reaches the loader. The notebook used
@@ -197,7 +197,7 @@ CREATE TABLE IF NOT EXISTS staging.sendem_fact_events_daily (
 );
 
 -- ---------------------------------------------------------------------------
--- etl: pipeline run tracking (used by jobs/sync_sendem.py via
+-- etl: pipeline run tracking (used by ge_data_platform/sources/sendem/sync.py via
 -- PostgresLoader.start_sync_run / finish_sync_run)
 -- ---------------------------------------------------------------------------
 

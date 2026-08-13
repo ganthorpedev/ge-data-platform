@@ -331,7 +331,7 @@ had zero activity yesterday").
 
 ## Recommended refresh approach
 
-- **Trackunit**: `python -m jobs.sync_trackunit_daily_activity` (no args)
+- **Trackunit**: `python -m ge_data_platform.sources.trackunit.daily_activity` (no args)
   defaults to a rolling 2-day sync — schedule hourly. `reporting.vw_trackunit_daily_activity`
   reflects new rows immediately (plain view, no materialization).
 - **Sendem**: `sendem_hourly_sync` job (existing, unchanged) keeps `staging.sendem_*`

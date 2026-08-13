@@ -226,7 +226,7 @@ def validate_combined_for_full_replace(
     """Refuse to replace the destination table with unsafe data.
 
     This runs on the fully combined, transformed, snake_case DataFrame
-    (transforms.accounts.evolution.project_reports_transform.build_combined
+    (ge_data_platform.sources.evolution.project_reports.build_combined
     output) before any staging or destination table is touched. Raises
     `ValueError` -- never silently proceeds -- if:
 
@@ -697,7 +697,7 @@ class PostgresLoader:
         """Atomically replace raw.evolution_project_reports with combined_df.
 
         `combined_df` is expected to be the output of
-        transforms.accounts.evolution.project_reports_transform.build_combined
+        ge_data_platform.sources.evolution.project_reports.build_combined
         (already snake_case, combined, and business-unit classified).
 
         This is a full-refresh load, not an upsert: dbo.vwProjectsReports is

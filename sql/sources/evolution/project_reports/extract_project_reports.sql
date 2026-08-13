@@ -3,7 +3,7 @@
 -- Ported verbatim (column list, order, and casts) from the working
 -- evolution_extraction_pipeline notebook's build_select_columns()/
 -- extract_data(). Executed once per configured Evolution source database
--- (GE, TLS) by connectors/accounts/evolution/project_reports.py -- the
+-- (GE, TLS) by ge_data_platform/sources/evolution/project_reports.py -- the
 -- query itself is identical for both companies; only the connection's
 -- target database differs.
 --

@@ -1,14 +1,14 @@
-# Telemetry ETL
+# GE Data Platform
 
-Production ETL for synchronising Sendem/MiX, EzyTrack/Telematics Guru,
-Trackunit telemetry, and Accounts/Evolution data into the PostgreSQL
-`telemetry_warehouse` database. Each source has its own connector, transform,
-and load plan; loads use the existing UPSERT keys so overlapping windows and
-recovery reruns are idempotent.
+ETL for synchronising Sendem/MiX, EzyTrack/Telematics Guru, Trackunit
+telemetry, and Accounts/Evolution data into the PostgreSQL
+`telemetry_warehouse` database. Each source has its own client, transform,
+and load plan under `src/ge_data_platform/sources/`; loads use the existing
+UPSERT keys so overlapping windows and recovery reruns are idempotent.
 
 ```text
-Provider API -> connector -> transform -> raw / staging -> warehouse / reporting
-                                      \-> etl.sync_runs / etl.sync_table_loads
+Provider API -> client -> transform -> raw / staging -> warehouse / reporting
+                                   \-> etl.sync_runs / etl.sync_table_loads
 ```
 
 - `raw` keeps provider-specific records close to their source shape. Accounts
@@ -21,16 +21,22 @@ Provider API -> connector -> transform -> raw / staging -> warehouse / reporting
 - `etl` records job and table-load outcomes for operations and recovery,
   shared by every source (telemetry and accounts alike).
 
+> This repository is `ge-data-platform` (Python package `ge_data_platform`),
+> the restructured successor to the flat `telemetry_etl` project. The
+> database is still named `telemetry_warehouse` and production still runs
+> from its existing location -- neither has moved yet; that is a later,
+> deliberate phase.
+
 ## Quick start
 
-The production runtime is Python 3.13 with dependencies pinned in
-`requirements.txt`, including `dagster==1.13.14` and
-`dagster-webserver==1.13.14`. Run commands from the project root. Do not create
-a new virtual environment as part of a production deployment.
+The development runtime is Python 3.13. Dependencies are declared in
+`pyproject.toml` (pinned versions carried over from the project's
+`requirements.txt`, kept for operational compatibility). Run commands from
+the repository root. Do not create a virtual environment.
 
 ```powershell
-Set-Location 'C:\Local Warehouse\Telemetry\telemetry-etl'
-python -m pip install -r requirements.txt
+Set-Location <path to ge-data-platform>
+python -m pip install -e . --no-deps
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
@@ -46,8 +52,9 @@ Configuration precedence is:
    with a migration warning.
 
 Apply the SQL migrations before enabling the hardened schedules. Existing
-production databases need `sql/027_add_trackunit_counter_quality.sql` followed
-by `sql/028_add_sync_run_abandoned_support.sql`; both are idempotent. See the
+production databases need `sql/migrations/027_add_trackunit_counter_quality.sql`
+followed by `sql/migrations/028_add_sync_run_abandoned_support.sql`; both are
+idempotent. See the
 [reliability operations runbook](docs/reliability_operations.md#migrations)
 for the exact commands and verification queries.
 
@@ -55,32 +62,33 @@ for the exact commands and verification queries.
 
 ```powershell
 # Sendem: configured lookback, or an explicit recovery lookback
-python -m jobs.sync_sendem
-python -m jobs.sync_sendem --lookback-days 7
+python -m ge_data_platform.sources.sendem.sync
+python -m ge_data_platform.sources.sendem.sync --lookback-days 7
 
 # EzyTrack: cursor-based catch-up, or fixed-window reconciliation
-python -m jobs.sync_ezytrack
-python -m jobs.sync_ezytrack --reconcile
+python -m ge_data_platform.sources.ezytrack.sync
+python -m ge_data_platform.sources.ezytrack.sync --reconcile
 
 # Trackunit: exact day, inclusive range, or rolling recovery
-python -m jobs.sync_trackunit_daily_activity --date 2026-08-02
-python -m jobs.sync_trackunit_daily_activity --from-date 2026-07-27 --to-date 2026-08-02
-python -m jobs.sync_trackunit_daily_activity --rolling-days 1
-python -m jobs.sync_trackunit_daily_activity --rolling-days 7
+python -m ge_data_platform.sources.trackunit.daily_activity --date 2026-08-02
+python -m ge_data_platform.sources.trackunit.daily_activity --from-date 2026-07-27 --to-date 2026-08-02
+python -m ge_data_platform.sources.trackunit.daily_activity --rolling-days 1
+python -m ge_data_platform.sources.trackunit.daily_activity --rolling-days 7
 
 # Run after Trackunit activity for a date when location enrichment is needed
-python -m jobs.sync_trackunit_location_enrichment --date 2026-08-02
+python -m ge_data_platform.sources.trackunit.location --date 2026-08-02
 
 # Accounts: Evolution Project Reports (full extract of GE + TLS every run)
-python -m jobs.accounts.evolution.sync_project_reports
+python -m ge_data_platform.sources.evolution.project_reports
 ```
 
-The Accounts/Evolution pipeline needs migration `sql/029_create_accounts_evolution_project_reports_schema.sql`
+The Accounts/Evolution pipeline needs migration
+`sql/migrations/029_create_accounts_evolution_project_reports_schema.sql`
 applied (idempotent, safe to rerun) and the `EVOLUTION_*` variables in `.env`
 filled in -- see `.env.example`.
 
 ```powershell
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\029_create_accounts_evolution_project_reports_schema.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\029_create_accounts_evolution_project_reports_schema.sql
 ```
 
 See the [operations runbook](docs/reliability_operations.md) before a backfill.
@@ -95,19 +103,19 @@ APIs.
 
 ```powershell
 python -m pytest
-python -m jobs.sync_sendem --help
-python -m jobs.sync_ezytrack --help
-python -m jobs.sync_trackunit_daily_activity --help
-python -c "from orchestration.definitions import defs; defs.get_repository_def(); print('Dagster definitions loaded')"
-$env:DAGSTER_HOME = 'C:\Local Warehouse\Telemetry\dagster_home'
-dagster job list -m orchestration.definitions
-dagster schedule list -m orchestration.definitions
-dagster sensor list -m orchestration.definitions
+python -m ge_data_platform.sources.sendem.sync --help
+python -m ge_data_platform.sources.ezytrack.sync --help
+python -m ge_data_platform.sources.trackunit.daily_activity --help
+python -c "from ge_data_platform.orchestration.definitions import defs; defs.get_repository_def(); print('Dagster definitions loaded')"
+$env:DAGSTER_HOME = '<path to a local Dagster home>'
+dagster job list -m ge_data_platform.orchestration.definitions
+dagster schedule list -m ge_data_platform.orchestration.definitions
+dagster sensor list -m ge_data_platform.orchestration.definitions
 # Equivalent -w form, using the repo's workspace.yaml:
 dagster schedule list -w workspace.yaml
 ```
 
-Expect exactly 10 jobs, 7 schedules, and 2 sensors, including the new
+Expect exactly 10 jobs, 7 schedules, and 2 sensors, including the
 `trackunit_intraday_refresh` job and `trackunit_intraday_refresh_schedule`
 (`20 */3 * * *`, `Africa/Harare`).
 

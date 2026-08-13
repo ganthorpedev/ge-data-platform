@@ -2,7 +2,7 @@
 --
 -- A separate table, separate raw tables, and a separate job/connector
 -- methods from the already-working metric ETL (staging.trackunit_daily_activity
--- and jobs/sync_trackunit_daily_activity.py) -- neither of those is touched
+-- and ge_data_platform/sources/trackunit/daily_activity.py) -- neither of those is touched
 -- by this migration or by anything that loads into these new tables.
 --
 -- Proven in Manitou/manitou_trackunit_exploration.ipynb (machine 5986,
