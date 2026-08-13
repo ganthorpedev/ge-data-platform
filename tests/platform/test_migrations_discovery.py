@@ -26,6 +26,8 @@ def test_discover_migrations_finds_real_baseline_files_in_order() -> None:
         "008_create_stg_sendem.sql",
         "009_create_raw_ezytrack.sql",
         "010_create_stg_ezytrack.sql",
+        "011_create_raw_evolution.sql",
+        "012_create_stg_evolution.sql",
     ]
 
 

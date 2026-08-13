@@ -31,6 +31,10 @@ env/
 # Runtime/watermark state
 last_loaded_date
 
+# Evolution batch-evidence capture (real financial aggregates -- dev-machine
+# artifact of scripts/run_evolution_first_load.py, never committed)
+scripts/_evolution_first_load_evidence.json
+
 # Editors and OS
 .vscode/
 .idea/
