@@ -3,6 +3,13 @@
 Database: `telemetry_warehouse` (PostgreSQL)
 Power BI schema: **`reporting`**
 
+> This dictionary describes the current, live reporting layer, which still
+> lives in `telemetry_warehouse.reporting`. A new platform database,
+> `ge_warehouse`, is under construction (see `docs/ge_warehouse_architecture.md`)
+> but is not reporting-facing yet -- Power BI must keep pointing at
+> `telemetry_warehouse.reporting` until a future phase explicitly cuts it
+> over to `ge_warehouse`'s `mart_*` schemas.
+
 ## The one rule
 
 **Power BI must only ever connect to the `reporting` schema.** Never point a
@@ -13,12 +20,12 @@ ETL target — none of it is meant to be interpreted without the cleanup and
 blending logic that lives in the `reporting` views. `warehouse` is currently
 unused and out of scope for this step.
 
-The `powerbi_reader` role (see `sql/migrations/024_create_powerbi_reader_role.sql`, not
+The `powerbi_reader` role (see `sql/legacy/telemetry_migrations/024_create_powerbi_reader_role.sql`, not
 yet run) is deliberately granted `USAGE`/`SELECT` on `reporting` only, with no
 grants anywhere else, so this rule is enforced at the database level once
 that file is applied.
 
-Every view below is created/replaced by `sql/migrations/022_create_reporting_powerbi_views.sql`,
+Every view below is created/replaced by `sql/legacy/telemetry_migrations/022_create_reporting_powerbi_views.sql`,
 which only ever creates the `reporting` schema and `CREATE OR REPLACE VIEW`
 statements — it never inserts, updates, deletes, truncates, or alters a
 table. It is safe to re-run at any time.
@@ -435,7 +442,7 @@ ORDER BY activity_date DESC;
    not a configured setting — see Timezone Handling above.
 7. **`vw_provider_sync_health` thresholds (6h/48h)** are defaults, not
    tuned against confirmed production scheduling cadence.
-8. **`powerbi_reader` role is not yet created** — `sql/migrations/024_create_powerbi_reader_role.sql`
+8. **`powerbi_reader` role is not yet created** — `sql/legacy/telemetry_migrations/024_create_powerbi_reader_role.sql`
    exists for review but has deliberately not been run.
 9. **`vw_ezytrack_trip_report` has no fuel data.** `"Estimated Fuel Consumption (l)"`
    is always `NULL` — no fuel field exists anywhere in raw/staging EzyTrack

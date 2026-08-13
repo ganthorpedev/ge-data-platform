@@ -26,6 +26,14 @@ Provider API -> client -> transform -> raw / staging -> warehouse / reporting
 > database is still named `telemetry_warehouse` and production still runs
 > from its existing location -- neither has moved yet; that is a later,
 > deliberate phase.
+>
+> A second, new database -- `ge_warehouse` -- now exists alongside
+> `telemetry_warehouse` on the local development Postgres instance. It is
+> the platform architecture baseline described in
+> `docs/ge_warehouse_architecture.md`: schemas and ops metadata only, no
+> ingestion pipeline writes to it yet, and no production system reads from
+> it. `telemetry_warehouse` remains the only database any running job or
+> Power BI report actually uses.
 
 ## Quick start
 
@@ -52,8 +60,8 @@ Configuration precedence is:
    with a migration warning.
 
 Apply the SQL migrations before enabling the hardened schedules. Existing
-production databases need `sql/migrations/027_add_trackunit_counter_quality.sql`
-followed by `sql/migrations/028_add_sync_run_abandoned_support.sql`; both are
+production databases need `sql/legacy/telemetry_migrations/027_add_trackunit_counter_quality.sql`
+followed by `sql/legacy/telemetry_migrations/028_add_sync_run_abandoned_support.sql`; both are
 idempotent. See the
 [reliability operations runbook](docs/reliability_operations.md#migrations)
 for the exact commands and verification queries.
@@ -83,7 +91,7 @@ python -m ge_data_platform.sources.evolution.project_reports
 ```
 
 The Accounts/Evolution pipeline needs migration
-`sql/migrations/029_create_accounts_evolution_project_reports_schema.sql`
+`sql/legacy/telemetry_migrations/029_create_accounts_evolution_project_reports_schema.sql`
 applied (idempotent, safe to rerun) and the `EVOLUTION_*` variables in `.env`
 filled in -- see `.env.example`.
 
@@ -95,6 +103,25 @@ See the [operations runbook](docs/reliability_operations.md) before a backfill.
 It covers rate limits, timeouts, safe provider recovery, validation modes,
 Dagster schedules and sensors, alerting, stale `ABANDONED` runs, and SQL for
 inspecting `etl.sync_runs` and `etl.sync_table_loads`.
+
+## GE Warehouse platform baseline (development)
+
+`ge_warehouse` is the new platform database described in
+[`docs/ge_warehouse_architecture.md`](docs/ge_warehouse_architecture.md) --
+schemas, ops metadata, roles, and `core.dim_date` only; no ingestion pipeline
+writes to it yet. `GE_WAREHOUSE_DB` (default `ge_warehouse`) and the shared
+`POSTGRES_HOST`/`POSTGRES_USER`/`POSTGRES_PASSWORD` variables configure it --
+see `.env.example`. To create it and apply every baseline migration:
+
+```powershell
+python -m scripts.setup_ge_warehouse --all
+```
+
+Or step by step: `--create-db`, then `--migrate`, then `--validate` (runs
+`sql/validation/validate_ge_warehouse_baseline.sql` and prints every
+PASS/FAIL check). This never touches `telemetry_warehouse`. See
+[`docs/legacy_to_platform_migration_inventory.md`](docs/legacy_to_platform_migration_inventory.md)
+for the full current -> target object mapping.
 
 ## Validate
 
