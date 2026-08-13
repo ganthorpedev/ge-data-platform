@@ -22,6 +22,8 @@ def test_discover_migrations_finds_real_baseline_files_in_order() -> None:
         "004_create_core_dim_date.sql",
         "005_create_raw_trackunit.sql",
         "006_create_stg_trackunit.sql",
+        "007_create_raw_sendem.sql",
+        "008_create_stg_sendem.sql",
     ]
 
 
