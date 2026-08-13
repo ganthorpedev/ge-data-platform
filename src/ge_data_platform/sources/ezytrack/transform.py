@@ -4,8 +4,9 @@ database-ready tables.
 This module owns dataframe construction and derived-metric calculation for
 EzyTrack. Column sets match sql/010_create_ezytrack_schema.sql exactly
 (excluding `loaded_at`, which is a database-side default column added by the
-loader per upsert batch, the same convention transforms/sendem_transform.py
-and loaders/postgres_loader.py already use -- it is not produced here).
+loader per upsert batch, the same convention
+ge_data_platform.sources.sendem.transform and ge_data_platform.common.
+database already use -- it is not produced here).
 
 It must not perform any I/O (no HTTP calls, no database access, no
 environment reads), and it must not mutate the raw API records passed in.
@@ -234,14 +235,14 @@ def build_all(assets_records: list[dict], trips_records: list[dict]) -> dict[str
 def _smoke_test() -> None:
     """Fetch a tiny live window and run build_all() over it, printing shapes only.
 
-    Not called on import -- only runs via `python -m transforms.ezytrack_transform`.
-    Makes live API calls (via the connector) but never writes to PostgreSQL.
+    Not called on import -- only runs via
+    `python -m ge_data_platform.sources.ezytrack.transform`. Makes live API
+    calls (via the connector) but never writes to PostgreSQL.
     """
     from datetime import timedelta
 
-    from utils.dates import format_utc_iso, utc_now
-
-    from connectors.ezytrack_client import fetch_ezytrack_assets, fetch_ezytrack_trips
+    from ge_data_platform.common.dates import format_utc_iso, utc_now
+    from ge_data_platform.sources.ezytrack.client import fetch_ezytrack_assets, fetch_ezytrack_trips
 
     assets_records = fetch_ezytrack_assets()
 

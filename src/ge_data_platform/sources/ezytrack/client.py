@@ -8,15 +8,16 @@ geofence history, driver master, per-asset deep queries) to keep GraphQL
 queries cheap against the API's cost-based rate limit.
 
 This module returns raw API records only. It does not shape data into
-database columns (that belongs in transforms/ezytrack_transform.py), does
-not convert timestamps, and does not write to PostgreSQL.
+database columns (that belongs in ge_data_platform.sources.ezytrack.
+transform), does not convert timestamps, and does not write to PostgreSQL.
 
 Unlike the prototype notebook, fetch_ezytrack_trips() does not swallow a
 GraphQL cost-limit hit and return partial data -- it raises RateLimitError
 with the failed window attached, so callers can never mistake a partial
 fetch for a complete one. Callers are expected to fetch trips in small
-time chunks (see jobs/sync_ezytrack.py) to keep each individual request
-cheap and to bound how much progress is lost if one chunk fails.
+time chunks (see ge_data_platform.sources.ezytrack.sync) to keep each
+individual request cheap and to bound how much progress is lost if one
+chunk fails.
 
 Authentication (EzytrackClient.authenticate) is dynamic: Telematics Guru
 access tokens expire after roughly 24 hours, so a token fetched once and
@@ -38,8 +39,8 @@ from typing import Any
 
 import requests
 
-from config.settings import EzytrackSettings, get_ezytrack_settings, get_http_settings
-from utils.http import build_retrying_session
+from ge_data_platform.common.http import build_retrying_session
+from ge_data_platform.config.settings import EzytrackSettings, get_ezytrack_settings, get_http_settings
 
 ASSETS_QUERY = """
 query GetAssets($organisationId: Int!) {

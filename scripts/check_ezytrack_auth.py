@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sys
 
-from connectors.ezytrack_client import EzytrackClient
+from ge_data_platform.sources.ezytrack.client import EzytrackClient
 
 
 def run() -> None:

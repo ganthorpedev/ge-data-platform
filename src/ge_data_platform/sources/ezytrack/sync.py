@@ -1,14 +1,15 @@
 """Entry point for the EzyTrack / Telematics Guru sync job.
 
 Run with:
-    python -m jobs.sync_ezytrack
+    python -m ge_data_platform.sources.ezytrack.sync
 
 Daily reconciliation mode (a longer, fixed lookback):
-    python -m jobs.sync_ezytrack --reconcile
+    python -m ge_data_platform.sources.ezytrack.sync --reconcile
 
-This orchestrates: fetch (connectors.ezytrack_client) -> transform
-(transforms.ezytrack_transform) -> load (loaders.postgres_loader), and
-records the run in etl.sync_runs / etl.sync_table_loads.
+This orchestrates: fetch (ge_data_platform.sources.ezytrack.client) ->
+transform (ge_data_platform.sources.ezytrack.transform) -> load
+(ge_data_platform.common.database), and records the run in etl.sync_runs /
+etl.sync_table_loads.
 
 RELIABLE CATCH-UP MODE:
 The first run uses the existing default lookback (6 hours by default).
@@ -25,7 +26,7 @@ nothing is loaded and the run is marked FAILED.
 
 AUTHENTICATION:
 This job authenticates once, explicitly, right after starting the sync_run
-row -- see connectors.ezytrack_client.EzytrackClient. Telematics Guru access
+row -- see ge_data_platform.sources.ezytrack.client.EzytrackClient. Telematics Guru access
 tokens expire after ~24h, so the token is never read from a static .env
 value; it's fetched fresh every run and held in memory only. An auth
 failure marks the run FAILED with a safe message (never the username,
@@ -43,12 +44,17 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from config.settings import EzytrackSettings, get_etl_ops_settings, get_ezytrack_settings, get_settings
-from connectors.ezytrack_client import EzytrackClient
-from loaders.postgres_loader import PostgresLoader, finish_sync_run_failed_safe
-from transforms.ezytrack_transform import build_all
-from utils.dates import format_utc_iso, to_date_key, utc_now
-from utils.logging_config import configure_logging
+from ge_data_platform.common.database import PostgresLoader, finish_sync_run_failed_safe
+from ge_data_platform.common.dates import format_utc_iso, to_date_key, utc_now
+from ge_data_platform.common.logging import configure_logging
+from ge_data_platform.config.settings import (
+    EzytrackSettings,
+    get_etl_ops_settings,
+    get_ezytrack_settings,
+    get_settings,
+)
+from ge_data_platform.sources.ezytrack.client import EzytrackClient
+from ge_data_platform.sources.ezytrack.transform import build_all
 
 SOURCE_SYSTEM = "ezytrack"
 JOB_NAME = "ezytrack_hourly_sync"

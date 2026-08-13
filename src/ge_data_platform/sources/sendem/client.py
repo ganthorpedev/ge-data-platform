@@ -6,8 +6,8 @@ Transform and loader modules must not make HTTP calls directly.
 
 from __future__ import annotations
 
-from config.settings import Settings, get_http_settings, get_settings
-from utils.http import build_retrying_session
+from ge_data_platform.common.http import build_retrying_session
+from ge_data_platform.config.settings import Settings, get_http_settings, get_settings
 
 
 class SendemClient:

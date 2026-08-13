@@ -1,11 +1,11 @@
 """Entry point for the Sendem/MiX sync job.
 
 Run with:
-    python -m jobs.sync_sendem
+    python -m ge_data_platform.sources.sendem.sync
 
-This orchestrates: fetch (connectors.sendem_client) -> transform
-(transforms.sendem_transform) -> load (loaders.postgres_loader), and records
-the run in etl.sync_runs.
+This orchestrates: fetch (ge_data_platform.sources.sendem.client) ->
+transform (ge_data_platform.sources.sendem.transform) -> load
+(ge_data_platform.common.database), and records the run in etl.sync_runs.
 """
 
 from __future__ import annotations
@@ -13,12 +13,12 @@ from __future__ import annotations
 import argparse
 import logging
 
-from config.settings import get_etl_ops_settings, get_settings
-from connectors.sendem_client import SendemClient
-from loaders.postgres_loader import PostgresLoader, finish_sync_run_failed_safe
-from transforms.sendem_transform import build_all
-from utils.dates import rolling_window
-from utils.logging_config import configure_logging
+from ge_data_platform.common.database import PostgresLoader, finish_sync_run_failed_safe
+from ge_data_platform.common.dates import rolling_window
+from ge_data_platform.common.logging import configure_logging
+from ge_data_platform.config.settings import get_etl_ops_settings, get_settings
+from ge_data_platform.sources.sendem.client import SendemClient
+from ge_data_platform.sources.sendem.transform import build_all
 
 SOURCE_SYSTEM = "sendem"
 JOB_NAME = "sendem_hourly_sync"

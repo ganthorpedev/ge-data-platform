@@ -5,7 +5,7 @@ Run with:
 
 Fetches a tiny live window (last 1 hour) of EzyTrack assets/trips,
 transforms them, and loads them into PostgreSQL using
-loaders.postgres_loader.PostgresLoader.load_ezytrack_tables().
+ge_data_platform.common.database.PostgresLoader.load_ezytrack_tables().
 
 This is a smoke test only, NOT the production sync job:
 - Does not create a sync_run.
@@ -19,11 +19,11 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from config.settings import get_settings
-from connectors.ezytrack_client import fetch_ezytrack_assets, fetch_ezytrack_trips
-from loaders.postgres_loader import PostgresLoader
-from transforms.ezytrack_transform import build_all
-from utils.dates import format_utc_iso, utc_now
+from ge_data_platform.common.database import PostgresLoader
+from ge_data_platform.common.dates import format_utc_iso, utc_now
+from ge_data_platform.config.settings import get_settings
+from ge_data_platform.sources.ezytrack.client import fetch_ezytrack_assets, fetch_ezytrack_trips
+from ge_data_platform.sources.ezytrack.transform import build_all
 
 
 def run() -> None:
