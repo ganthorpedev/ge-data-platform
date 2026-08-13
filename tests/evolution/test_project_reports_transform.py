@@ -7,7 +7,9 @@ import pytest
 
 from ge_data_platform.sources.evolution.project_reports import (
     SOURCE_COLUMNS,
+    add_business_unit_classification,
     build_combined,
+    build_raw,
     combine_data,
     determine_business_unit,
     determine_ge_business_unit,
@@ -252,3 +254,63 @@ def test_money_columns_are_not_rounded_or_altered_by_the_pipeline() -> None:
 
     assert combined.loc[0, "debit"] == exact_value
     assert str(combined.loc[0, "debit"]) == "47.1504"
+
+
+# ---------------------------------------------------------------------------
+# raw/staging split (build_raw + add_business_unit_classification) --
+# platform target's raw_evolution/stg_evolution layering. See
+# docs/migration/legacy-to-platform-migration.md#evolution-migration-completed.
+# ---------------------------------------------------------------------------
+
+
+def test_build_raw_has_no_business_unit_column() -> None:
+    ge = _dataset("GE", [_row(Id=1)])
+
+    raw_df = build_raw({"GE": ge})
+
+    assert "business_unit" not in raw_df.columns
+    assert list(raw_df.columns) == ["company", *[to_snake_case(c) for c in SOURCE_COLUMNS]]
+
+
+def test_build_raw_is_snake_case_and_preserves_row_count() -> None:
+    ge = _dataset("GE", [_row(Id=1), _row(Id=2)])
+    tls = _dataset("TLS", [_row(Id=1)])
+
+    raw_df = build_raw({"GE": ge, "TLS": tls})
+
+    assert len(raw_df) == 3
+    assert "d_date" in raw_df.columns and "DDate" not in raw_df.columns
+
+
+def test_add_business_unit_classification_matches_build_combined_exactly() -> None:
+    # build_combined is now build_raw + add_business_unit_classification
+    # composed -- prove the two-step platform path produces byte-identical
+    # output to the still-used legacy one-step path.
+    ge = _dataset("GE", [_row(Id=1, DDate="2026-06-01", CostType="2000/101/00/-/US$")])
+    tls = _dataset("TLS", [_row(Id=1, DDate="2026-01-15", CostType="1050001/anything")])
+    datasets = {"GE": ge, "TLS": tls}
+
+    raw_df = build_raw(datasets)
+    staged_df = add_business_unit_classification(raw_df)
+    combined_df = build_combined(datasets)
+
+    pd.testing.assert_frame_equal(staged_df, combined_df)
+
+
+def test_add_business_unit_classification_appends_business_unit_last() -> None:
+    ge = _dataset("GE", [_row(Id=1, DDate="2026-06-01", CostType="2000/106/00/-/US$")])
+    raw_df = build_raw({"GE": ge})
+
+    staged_df = add_business_unit_classification(raw_df)
+
+    assert list(staged_df.columns)[-1] == "business_unit"
+    assert staged_df.loc[0, "business_unit"] == "Commercial Training"
+
+
+def test_add_business_unit_classification_does_not_mutate_its_input() -> None:
+    ge = _dataset("GE", [_row(Id=1)])
+    raw_df = build_raw({"GE": ge})
+
+    add_business_unit_classification(raw_df)
+
+    assert "business_unit" not in raw_df.columns
