@@ -1,7 +1,12 @@
 # EzyTrack / Telematics Guru
 
-**Status: IMPLEMENTED and running against `telemetry_warehouse` (LEGACY
-target database). Not yet ported to `raw_ezytrack`/`stg_ezytrack`.**
+**Status: IMPLEMENTED. Production Dagster schedules still write only to
+`telemetry_warehouse` (LEGACY target, default). `raw_ezytrack`/`stg_ezytrack`
+also exist in `ge_warehouse` now, historically backfilled and validated, and
+the same code can write there via `--target platform` -- opt-in, not the
+default, not wired to any schedule. See
+`docs/migration/legacy-to-platform-migration.md#ezytrack-migration-completed`
+for the full migration record.**
 
 Source system for fleet telemetry (assets and trips) via the Telematics Guru
 GraphQL API. Feeds the **Fleet** business domain alongside Trackunit and
@@ -120,3 +125,51 @@ python -m scripts.check_ezytrack_auth
 
 Confirms the auth request succeeds and that `token_type`/`expires_in` came
 back; never prints the access token itself. Non-zero exit code on failure.
+
+## `ge_warehouse` platform target
+
+**Status: IMPLEMENTED, opt-in, not scheduled.**
+
+`ge_data_platform.sources.ezytrack.sync` accepts `--target {legacy,platform}`
+(default `legacy` -- current behavior, unchanged) and an optional
+`--lookback-hours` override:
+
+```powershell
+python -m ge_data_platform.sources.ezytrack.sync --target platform --lookback-hours 1
+```
+
+`--target platform`:
+
+- writes to `raw_ezytrack.*`/`stg_ezytrack.*` in `ge_warehouse` instead of
+  `raw.*`/`staging.*` in `telemetry_warehouse` (same client/transform code,
+  same auth/retry/pagination/cursor-repeat/max-page/dedup behavior -- only
+  the destination schema/table names and database differ, via
+  `PostgresLoader.from_platform_settings` and the `target=` parameter on
+  `load_ezytrack_tables` in `common/database.py`);
+- skips `etl.sync_runs`/`etl.sync_table_loads` bookkeeping (`ops.pipeline_run`/
+  `ops.table_load` are not yet wired);
+- skips post-load validation (its checks are hardcoded to legacy schema
+  names).
+
+**Catch-up safety (the one shared-code change this migration required):**
+`ge_warehouse` has no `etl` schema at all, so a platform-target run must
+never read legacy `telemetry_warehouse.etl.sync_runs` for its catch-up
+cursor -- especially since that cursor can go stale (confirmed during this
+migration: legacy's last successful EzyTrack sync was 2026-07-21, with
+repeated `GraphQL cost rate limit exceeded` failures on every catch-up/
+reconciliation attempt since). `PostgresLoader.get_last_successful_run` now
+returns `None` immediately whenever `enable_sync_tracking` is `False`
+(always true for a platform-settings loader, per `from_platform_settings`)
+-- **before** issuing any query -- so a platform-target run always computes
+its window as first-run/explicit-window, identical in shape to how
+`--reconcile` already ignores the cursor by design. It never attempts a
+`max_catchup_hours`-capped historical catch-up inferred from legacy state.
+`--lookback-hours` lets an operator supply an explicit small window (e.g. 1
+hour) for a manual test, overriding `TELEMATICS_LOOKBACK_HOURS` for that one
+run only.
+
+No Dagster job or schedule passes `--target platform`; it is exercised only
+by manual invocation today. See
+`docs/migration/legacy-to-platform-migration.md#ezytrack-migration-completed`
+for the historical backfill, reconciliation, and a real fresh-ingestion test
+run against it (including the fresh-window idempotency proof).

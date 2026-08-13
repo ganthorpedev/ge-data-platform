@@ -14,12 +14,12 @@ checks against it). For what each layer *means*, see
 |---|---|---|---|
 | `raw_trackunit` | raw | IMPLEMENTED | 7 tables, populated -- full historical backfill from `telemetry_warehouse` plus live API data (see `docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed`) |
 | `raw_sendem` | raw | IMPLEMENTED | 5 tables, populated -- full historical backfill from `telemetry_warehouse` plus live API data (see `docs/migration/legacy-to-platform-migration.md#sendem-migration`) |
-| `raw_ezytrack` | raw | IMPLEMENTED | empty |
+| `raw_ezytrack` | raw | IMPLEMENTED | 2 tables, populated -- full historical backfill from `telemetry_warehouse` plus live API data (see `docs/migration/legacy-to-platform-migration.md#ezytrack-migration-completed`) |
 | `raw_evolution` | raw | IMPLEMENTED | empty |
 | `raw_fieldops` | raw | IMPLEMENTED | empty |
 | `stg_trackunit` | staging | IMPLEMENTED | 3 tables, populated -- see `docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed` |
 | `stg_sendem` | staging | IMPLEMENTED | 5 tables, populated -- includes legacy `clean.sendem_fact_*_daily` history back to 2026-01-01, see `docs/migration/legacy-to-platform-migration.md#sendem-migration` |
-| `stg_ezytrack` | staging | IMPLEMENTED | empty |
+| `stg_ezytrack` | staging | IMPLEMENTED | 2 tables, populated -- see `docs/migration/legacy-to-platform-migration.md#ezytrack-migration-completed` |
 | `stg_evolution` | staging | IMPLEMENTED | empty |
 | `stg_fieldops` | staging | IMPLEMENTED | empty |
 | `core` | core | IMPLEMENTED | `core.dim_date` (7,670 rows, 2015-01-01..2035-12-31) only |
@@ -87,6 +87,21 @@ is already staging-shaped (enriched with site/asset attributes), not
 raw-shaped, so it has no raw-layer counterpart. Only `stg_sendem.trip_daily`/
 `event_daily` carry the full 2026-01-01 history. See
 `docs/migration/legacy-to-platform-migration.md#sendem-migration`.
+
+### `raw_ezytrack` / `stg_ezytrack` tables
+
+Third source fully migrated -- see
+`docs/migration/legacy-to-platform-migration.md#ezytrack-migration-completed`
+for the full backfill/validation procedure and results. Unlike Sendem,
+EzyTrack has no legacy `clean.*` schema -- this is a straight 1:1 structural
+copy.
+
+| Table | Row count (dev, after historical backfill + one live sync) |
+|---|---|
+| `raw_ezytrack.asset` | 55 (51 historical + 4 from live-ingestion testing) |
+| `raw_ezytrack.trip` | 848 (823 historical + 25 from live-ingestion testing) |
+| `stg_ezytrack.asset` | 55 |
+| `stg_ezytrack.trip` | 848 |
 
 ### `ops` tables
 

@@ -8,17 +8,19 @@ document written when `ge_warehouse`'s baseline was first created; that
 content lives here now, kept current alongside the rest of the
 documentation instead of drifting in a separate file.
 
-**Status: baseline + Trackunit + Sendem raw/staging migrated and validated.**
-Trackunit's and Sendem's historical `raw`/`staging` data have been migrated
-into `raw_trackunit`/`stg_trackunit` and `raw_sendem`/`stg_sendem` in
+**Status: baseline + Trackunit + Sendem + EzyTrack raw/staging migrated and
+validated.** Trackunit's, Sendem's, and EzyTrack's historical `raw`/`staging`
+data have been migrated into `raw_trackunit`/`stg_trackunit`,
+`raw_sendem`/`stg_sendem`, and `raw_ezytrack`/`stg_ezytrack` in
 `ge_warehouse`, with full reconciliation against `telemetry_warehouse` and a
 real fresh-ingestion test for each -- see
-[Trackunit migration (completed)](#trackunit-migration-completed) and
-[Sendem migration (completed)](#sendem-migration-completed) below. EzyTrack,
-Evolution, and FieldOps have not moved. No Dagster schedule writes to
+[Trackunit migration (completed)](#trackunit-migration-completed),
+[Sendem migration (completed)](#sendem-migration-completed), and
+[EzyTrack migration (completed)](#ezytrack-migration-completed) below.
+Evolution and FieldOps have not moved. No Dagster schedule writes to
 `ge_warehouse` -- `telemetry_warehouse` remains the only database any
-*scheduled* job or Power BI report actually uses; Trackunit's and Sendem's
-platform-target code paths exist but are exercised only by manual
+*scheduled* job or Power BI report actually uses; all three migrated
+sources' platform-target code paths exist but are exercised only by manual
 invocation.
 
 ## The principle
@@ -50,8 +52,8 @@ flowchart TD
 |---|---|---|
 | `telemetry_warehouse` | Live production, unchanged throughout | ONGOING (LEGACY) |
 | parallel `ge_warehouse` | Schemas, `ops` metadata structure, roles, `core.dim_date` | IMPLEMENTED |
-| source-by-source migration | Each source's ingestion ported to write `raw_<source>`/`stg_<source>` | IN PROGRESS -- Trackunit and Sendem done (raw/staging only); EzyTrack/Evolution/FieldOps NOT STARTED |
-| validation | Row counts, spot checks, comparison queries between old and new for the same window | DONE for Trackunit (`scripts/validate_trackunit_migration.py`) and Sendem (`scripts/validate_sendem_migration.py`); NOT STARTED for other sources |
+| source-by-source migration | Each source's ingestion ported to write `raw_<source>`/`stg_<source>` | IN PROGRESS -- Trackunit, Sendem, and EzyTrack done (raw/staging only); Evolution/FieldOps NOT STARTED |
+| validation | Row counts, spot checks, comparison queries between old and new for the same window | DONE for Trackunit (`scripts/validate_trackunit_migration.py`), Sendem (`scripts/validate_sendem_migration.py`), and EzyTrack (`scripts/validate_ezytrack_migration.py`); NOT STARTED for other sources |
 | `core` | Cross-source conformance (`dim_asset` first, then facts) built on validated staging data | NOT STARTED -- blocked on source-map design, `docs/warehouse/source-mapping.md` |
 | marts | `mart_<domain>` objects built on `core` | NOT STARTED |
 | consumer cutover | Power BI/Excel/applications repointed from `telemetry_warehouse.reporting` to the new `reporting` schema | NOT STARTED |
@@ -104,8 +106,8 @@ object's *logic*, not its DDL, gets rebuilt once `core` exists under it).
 | `raw.sendem_event_descriptions` | `raw_sendem.event_description` | **migrated + validated** | 114 rows |
 | `raw.sendem_trips_assets_daily` | `raw_sendem.trip_daily` | **migrated + validated** | 1,906 historical rows (+ live rows from fresh-ingestion testing); not re-fetchable (rolling API window) -- no `clean.*` history (raw-shaped only, see below) |
 | `raw.sendem_events_assets_daily` | `raw_sendem.event_daily` | **migrated + validated** | 16,285 historical rows (+ live rows from fresh-ingestion testing); not re-fetchable |
-| `raw.ezytrack_assets` | `raw_ezytrack.asset` | structural-only | 51 rows |
-| `raw.ezytrack_trips` | `raw_ezytrack.trip` | structural-only | 823 rows |
+| `raw.ezytrack_assets` | `raw_ezytrack.asset` | **migrated + validated** | 51 historical rows (+4 from live-ingestion testing) |
+| `raw.ezytrack_trips` | `raw_ezytrack.trip` | **migrated + validated** | 823 historical rows (+25 from live-ingestion testing) |
 | `raw.evolution_project_reports` (defined; not yet applied on the local dev database) | `raw_evolution.project_report` | structural-only | Full-refresh source, always re-derivable from the live view |
 | -- (no source exists) | `raw_fieldops.*` | structural-only (empty schema) | See `docs/sources/fieldops.md` |
 
@@ -118,8 +120,8 @@ object's *logic*, not its DDL, gets rebuilt once `core` exists under it).
 | `staging.trackunit_location_enrichment` | `stg_trackunit.location_enrichment` | **migrated + validated** | 105 rows; address/zip/city/country stay NULL (V1) |
 | `staging.sendem_dim_assets` / `_dim_sites` / `_dim_event_types` | `stg_sendem.asset` / `.site` / `.event_type` | **migrated + validated** | 257 / 168 / 120 rows (+2 inferred placeholder event types, see below) |
 | `staging.sendem_fact_trips_daily` / `_fact_events_daily` | `stg_sendem.trip_daily` / `.event_daily` | **migrated + validated, with legacy `clean.*` history folded in** | 1,906 / 16,285 rolling-window rows + 11,439 / 106,188 exclusive historical rows from `clean.*` -- see [Sendem migration (completed)](#sendem-migration-completed) |
-| `staging.ezytrack_dim_assets` | `stg_ezytrack.asset` | structural-only | 51 rows |
-| `staging.ezytrack_fact_trips` | `stg_ezytrack.trip` | structural-only | 823 rows |
+| `staging.ezytrack_dim_assets` | `stg_ezytrack.asset` | **migrated + validated** | 51 historical rows (+4 from live-ingestion testing) |
+| `staging.ezytrack_fact_trips` | `stg_ezytrack.trip` | **migrated + validated** | 823 historical rows (+25 from live-ingestion testing) |
 | -- (no staging step today; `raw.evolution_project_reports` already carries `business_unit`) | `stg_evolution.project_report` | deferred | Would need a definition of what "cleaning" adds beyond what raw already does |
 
 ### Historical backfill (`clean` schema -- legacy, out of band)
@@ -470,11 +472,149 @@ platform target).
   runs (sync tracking is skipped, not redirected).
 - `reporting.vw_sendem_*` views were not touched or ported.
 
+## EzyTrack migration (completed)
+
+The third real source migration: `raw.ezytrack_*`/`staging.ezytrack_*` ->
+`raw_ezytrack.*`/`stg_ezytrack.*` in `ge_warehouse`. `core`/`mart_fleet`
+were deliberately **not** touched -- this phase stops at staging, same as
+Trackunit and Sendem.
+
+### Legacy objects found (inventory, before any DDL)
+
+Verified against the live `telemetry_warehouse` catalog (read-only session,
+independently confirmed local via `inet_server_addr()` = `::1`): 2
+`raw.ezytrack_*` tables, 2 `staging.ezytrack_*` tables, 2
+`reporting.vw_ezytrack_*` views (untouched by this migration). Unlike
+Sendem, **no `clean.*` or other historical-only schema exists for
+EzyTrack** -- confirmed by inspecting every schema in the live catalog (the
+old prototype's `telematics` schema is confirmed fully retired, no trace
+remains). `raw`+`staging` together are the complete legacy object set and
+the sole authoritative history. Both assets and trips are persisted; no
+duplicate `PRIMARY KEY`s; no orphan trip-to-asset references (0 rows).
+Oldest history: asset `last_connected_utc` back to 2025-01-31; trip data
+from 2026-06-25. Newest at inventory time: 2026-07-21 -- legacy had been
+stalled for 3+ weeks, with `etl.sync_runs` showing repeated `FAILED` rows
+(`GraphQL cost rate limit exceeded`) on every catch-up/reconciliation
+attempt since.
+
+### New objects created
+
+`sql/migrations/009_create_raw_ezytrack.sql` (2 tables) and
+`010_create_stg_ezytrack.sql` (2 tables), applied via
+`python -m scripts.setup_ge_warehouse --migrate`. Table names drop the
+redundant `ezytrack_` prefix; column shapes mirror the legacy tables 1:1 --
+a straight structural port, no history-folding decision needed (unlike
+Sendem's `clean.*`).
+
+### A discovered gap, and how it was handled
+
+Not a data gap this time, but a **shared-code safety gap**:
+`PostgresLoader.get_last_successful_run` (which EzyTrack's catch-up logic
+depends on to find its last successful window) unconditionally queried
+`etl.sync_runs` regardless of `enable_sync_tracking`. `ge_warehouse` has no
+`etl` schema at all, so an unguarded platform-target call would have either
+crashed outright or -- had the schema coincidentally existed -- silently
+misread legacy's 3-week-stale success cursor and attempted an unintended
+`max_catchup_hours`-capped (168h) catch-up on the very first platform test.
+Fixed at the source: `get_last_successful_run` now returns `None`
+immediately whenever `enable_sync_tracking` is `False`, before any query is
+issued. This makes a platform-target EzyTrack run behave as first-run/
+explicit-window unconditionally -- the same shape `--reconcile` already
+uses by design. Verified directly (an engine stub that raises if `connect()`
+is ever called still returns `None` cleanly) and covered by a permanent
+regression test. See `docs/operations/data-quality.md` for the full
+narrative.
+
+### Historical backfill and reconciliation results
+
+`scripts/backfill_ezytrack_historical.py` (local-only, read-only against
+`telemetry_warehouse`, `INSERT ... ON CONFLICT DO NOTHING`, restart-safe)
+copied both raw tables and both staging tables in full.
+`scripts/validate_ezytrack_migration.py` independently reconciles both
+databases object-by-object (row counts, key parity, null profiles, numeric
+sums, date/time coverage, distinct-asset counts, and an orphan-free join
+check):
+
+```text
+EZYTRACK HISTORICAL MIGRATION VALIDATION
+
+raw_ezytrack.asset    PASS
+raw_ezytrack.trip     PASS
+stg_ezytrack.asset    PASS
+stg_ezytrack.trip     PASS
+
+Overall: PASS
+```
+
+Every check passed with **zero tolerance** -- exact row counts, exact key
+parity, exact numeric sums (`distance_meters`, `distance_km`,
+`runtime_end_hrs`), exact date/time coverage, exact null-profile counts. No
+discrepancy was hidden behind a tolerance band anywhere.
+
+Re-running the backfill script a second time (idempotency test) inserted
+`0` new rows into all 4 objects (`read N, inserted 0` throughout);
+re-running the full reconciliation afterward still reported `Overall: PASS`.
+
+### Fresh-ingestion test
+
+After historical parity passed, `sync.py` was adapted (not forked) to
+support `--target platform` plus an explicit `--lookback-hours` override
+(needed precisely because of the catch-up-cursor gap above -- see
+`docs/sources/ezytrack.md#ge_warehouse-platform-target`), then run live
+once:
+
+```powershell
+python -m ge_data_platform.sources.ezytrack.sync --target platform --lookback-hours 1
+```
+
+against `ge_warehouse` / `raw_ezytrack` + `stg_ezytrack`, window
+2026-08-13T11:41:42Z to 2026-08-13T12:41:42Z (first-run mode, confirmed no
+catch-up cursor read), 1 chunk, page_size 50, with no Dagster schedule
+involved. Result: SUCCESS, 55 assets (4 new, real-world drift since the
+historical snapshot -- not a defect), 25 trips fetched in a single page (no
+`hasNextPage`, no cursor to repeat, `max_pages` guard never approached), 0
+duplicates, 0 orphan trip-to-asset references, all 823 historical trip rows
+confirmed unchanged and un-duplicated after the load. No `RateLimitError`
+or other quota event was encountered -- the small explicit window stayed
+comfortably under the cost limit that had been failing legacy's larger
+catch-up/reconciliation windows. `telemetry_warehouse`'s own EzyTrack sync
+had not advanced past 2026-07-21 at the time of this test (confirmed by
+direct inspection), so no legacy comparison is possible for the
+2026-08-13 window -- stated here rather than invented.
+`ops.pipeline_run`/`ops.table_load` stayed at 0 rows (sync tracking is
+skipped, not redirected, for the platform target).
+
+Re-running the identical window a second time (via `sync.run(target=
+"platform", lookback_hours=1, now_utc=<the same fixed timestamp>)`, since
+the CLI computes its window relative to wall-clock "now" and a fixed window
+is required to prove idempotency) fetched the same 55 assets and 25 trips,
+produced the same row counts (`raw_ezytrack.trip`/`stg_ezytrack.trip`
+stayed at 848, `raw_ezytrack.asset`/`stg_ezytrack.asset` at 55) with zero
+new duplicates -- only `loaded_at` audit timestamps advanced to the second
+run's single load timestamp, confirming the existing UPSERT semantics hold
+unchanged under the platform target.
+
+### What was intentionally not done in the EzyTrack phase
+
+- `core.dim_asset`/`core.asset_source_map` -- not built.
+- `mart_fleet.*` -- not built.
+- No Dagster schedule points at `ge_warehouse`; `--target platform` is
+  manual-only.
+- Legacy EzyTrack code/tables were not removed or altered.
+- `ops.pipeline_run`/`ops.table_load` are not written to for platform-target
+  runs (sync tracking is skipped, not redirected).
+- `reporting.vw_ezytrack_*` views were not touched or ported.
+- Provider quota was not intentionally exhausted to test failure handling --
+  the existing cursor-repeat/max-page/rate-limit unit tests (already
+  present before this migration) plus the new `get_last_successful_run`
+  guard tests cover the catch-up-safety surface without a real multi-day
+  provider pull.
+
 ## What this phase intentionally did not do
 
-- No row of EzyTrack, Evolution, or FieldOps application data copied from
-  `telemetry_warehouse` into `ge_warehouse` (Trackunit and Sendem are the
-  two exceptions -- see above).
+- No row of Evolution or FieldOps application data copied from
+  `telemetry_warehouse` into `ge_warehouse` (Trackunit, Sendem, and EzyTrack
+  are the three exceptions -- see above).
 - No `core` object except `core.dim_date`.
 - No `core.*_source_map` table (pattern chosen, not built -- see
   `docs/warehouse/source-mapping.md`).

@@ -159,6 +159,20 @@ A PowerShell session environment assignment overrides `.env` for that
 session only -- start a new session or remove the override before returning
 to the configured default.
 
+**EzyTrack platform target** -- `ge_warehouse`, opt-in, not scheduled:
+
+```powershell
+python -m ge_data_platform.sources.ezytrack.sync --target platform --lookback-hours 1
+```
+
+A platform-target run always computes its window as first-run/explicit-window
+(never a legacy-cursor-derived catch-up) -- `ge_warehouse` has no `etl`
+schema, so `PostgresLoader.get_last_successful_run` returns `None`
+immediately for a platform-settings loader, before any query. `--lookback-hours`
+lets an operator supply an explicit small window for a manual test. See
+`docs/sources/ezytrack.md#ge_warehouse-platform-target` and
+`docs/migration/legacy-to-platform-migration.md#ezytrack-migration-completed`.
+
 **Trackunit** -- recover the smallest known date or range (report dates are
 local `TRACKUNIT_TIMEZONE` calendar dates; API windows are converted to
 UTC):

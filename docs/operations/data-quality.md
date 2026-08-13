@@ -5,9 +5,11 @@ against `telemetry_warehouse` unless noted otherwise; Trackunit counter-reset
 handling also runs against `ge_warehouse` (`raw_trackunit`/`stg_trackunit`,
 opt-in via `--target platform` -- see `docs/sources/trackunit.md`). Sendem
 ingestion also runs against `ge_warehouse` (`raw_sendem`/`stg_sendem`,
-opt-in via `--target platform` -- see `docs/sources/sendem.md`), though its
-bounded post-load validation checks are skipped for that target (hardcoded
-to legacy schema names, same as Trackunit's).
+opt-in via `--target platform` -- see `docs/sources/sendem.md`), and so does
+EzyTrack (`raw_ezytrack`/`stg_ezytrack`, opt-in via `--target platform` --
+see `docs/sources/ezytrack.md`). All three sources skip their bounded
+post-load validation checks for the platform target (hardcoded to legacy
+schema names).
 
 ## Counter reset handling
 
@@ -62,6 +64,26 @@ bookkeeping. Separately, 2 `event_type_id`s referenced only by
 anywhere; the backfill synthesizes the same "Unknown Sendem Event Type"
 inferred placeholder row `ge_data_platform.sources.sendem.transform.build_dim_event_types()`
 would produce live, so no fact row is left orphaned.
+
+**Discovered during the EzyTrack `raw_ezytrack`/`stg_ezytrack` migration**
+(see `docs/migration/legacy-to-platform-migration.md#ezytrack-migration-completed`):
+legacy `telemetry_warehouse`'s own EzyTrack catch-up cursor
+(`etl.sync_runs`, `source_system='ezytrack'`) was found stale and unhealthy
+during the pre-live-test inventory -- last `SUCCESS` 2026-07-21, every
+catch-up/reconciliation attempt since `FAILED` with `GraphQL cost rate limit
+exceeded`. `ge_warehouse` has no `etl` schema at all, so
+`PostgresLoader.get_last_successful_run` (which `ge_data_platform.sources.ezytrack.sync`
+uses to compute its catch-up window) now returns `None` immediately whenever
+`enable_sync_tracking` is `False` -- always true for a platform-settings
+loader -- **before** issuing any query. Without this guard, a platform-target
+run would either crash (querying a table that doesn't exist) or, worse,
+misread legacy's 3-week-stale cursor and attempt an unintended
+`max_catchup_hours`-capped (168h) catch-up on its very first invocation.
+Verified directly: `PostgresLoader.from_platform_settings(...).get_last_successful_run("ezytrack")`
+returns `None` against an engine stub that raises if `connect()` is ever
+called. This is now a permanent regression test
+(`tests/ezytrack/test_ezytrack_platform_target.py`), not just a one-time
+manual check.
 
 ## Validation SQL philosophy
 
