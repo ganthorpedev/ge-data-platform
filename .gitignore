@@ -9,6 +9,8 @@ __pycache__/
 *.pyo
 *.pyd
 
+.pytest_cache/
+
 # Virtual environments
 .venv/
 venv/
@@ -19,6 +21,10 @@ env/
 *.csv
 *.xlsx
 .telemetry_etl_locks/
+.ge_data_platform_locks/
+
+# Runtime/watermark state
+last_loaded_date
 
 # Editors and OS
 .vscode/
