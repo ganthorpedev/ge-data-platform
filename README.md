@@ -1,46 +1,83 @@
 # GE Data Platform
 
-ETL for synchronising Sendem/MiX, EzyTrack/Telematics Guru, Trackunit
-telemetry, and Accounts/Evolution data into the PostgreSQL
-`telemetry_warehouse` database. Each source has its own client, transform,
-and load plan under `src/ge_data_platform/sources/`; loads use the existing
-UPSERT keys so overlapping windows and recovery reruns are idempotent.
+One GE enterprise data platform integrating multiple operational and
+financial source systems into governed, conformed business data for
+reporting and analytics.
 
-```text
-Provider API -> client -> transform -> raw / staging -> warehouse / reporting
-                                   \-> etl.sync_runs / etl.sync_table_loads
+**This is not merely a telemetry warehouse.** It grew from one (the
+predecessor `telemetry_etl` project), but the architecture -- `ge_warehouse`
+-- is explicitly designed around any current or future GE source system,
+telemetry or otherwise, conformed into one enterprise warehouse rather than
+siloed by vendor. See `docs/architecture/platform-overview.md`.
+
+## Source systems
+
+| Source | Status |
+|---|---|
+| Trackunit / Manitou | IMPLEMENTED (running against the legacy database) |
+| Sendem / MiX | IMPLEMENTED (running against the legacy database) |
+| EzyTrack / Telematics Guru | IMPLEMENTED (running against the legacy database) |
+| Accounts / Evolution | IMPLEMENTED (running against the legacy database) |
+| FieldOps | PLANNED -- no pipeline exists yet |
+
+Per-source detail (auth, retries, known limitations, schedule):
+`docs/sources/`.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Sources --> RAW["raw_&lt;source&gt;"] --> STG["stg_&lt;source&gt;"] --> CORE[core] --> MART["mart_&lt;domain&gt;"] --> REP["reporting (planned)"] --> BI["Power BI / Excel / approved consumers"]
+    OPS[ops] -. observes .- RAW
+    OPS -. observes .- STG
+    OPS -. observes .- CORE
+    OPS -. observes .- MART
 ```
 
-- `raw` keeps provider-specific records close to their source shape. Accounts
-  data (`raw.evolution_project_reports`) currently loads straight to `raw`
-  only -- no staging split yet, matching the source notebook's single
-  combined table.
-- `staging` contains cleaned and enriched provider tables.
-- `warehouse` and `reporting` expose stable reporting outputs, including the
-  Power BI views.
-- `etl` records job and table-load outcomes for operations and recovery,
-  shared by every source (telemetry and accounts alike).
+`ops` is the operational metadata/control plane running alongside the data
+path -- pipeline run history, table-load outcomes, watermarks, data-quality
+results, and alerts -- not a data layer itself. Full definitions:
+`docs/architecture/data-layers.md`.
 
-> This repository is `ge-data-platform` (Python package `ge_data_platform`),
-> the restructured successor to the flat `telemetry_etl` project. The
-> database is still named `telemetry_warehouse` and production still runs
-> from its existing location -- neither has moved yet; that is a later,
-> deliberate phase.
->
-> A second, new database -- `ge_warehouse` -- now exists alongside
-> `telemetry_warehouse` on the local development Postgres instance. It is
-> the platform architecture baseline described in
-> `docs/ge_warehouse_architecture.md`: schemas and ops metadata only, no
-> ingestion pipeline writes to it yet, and no production system reads from
-> it. `telemetry_warehouse` remains the only database any running job or
-> Power BI report actually uses.
+**Current implementation status** (see
+`docs/architecture/platform-overview.md` for the complete table): the
+schema layout above exists as real, validated structure in `ge_warehouse`
+on the development machine (18 schemas, `core.dim_date`, `ops` metadata
+tables, roles). **No source ingestion has been migrated into it yet** --
+every job today still reads/writes the legacy `telemetry_warehouse`
+database, described in `docs/migration/legacy-to-platform-migration.md`.
 
-## Quick start
+## Repository structure
 
-The development runtime is Python 3.13. Dependencies are declared in
-`pyproject.toml` (pinned versions carried over from the project's
-`requirements.txt`, kept for operational compatibility). Run commands from
-the repository root. Do not create a virtual environment.
+```text
+src/ge_data_platform/    installable package: config, common, sources/<source>, orchestration
+sql/migrations/          new, independent ge_warehouse migration sequence
+sql/legacy/               frozen telemetry_warehouse migrations (historical reference)
+sql/validation/           read-only validation packs (both databases)
+tests/                    pytest, organized per source + orchestration + platform
+docs/                     see below
+scripts/                  operational entry points (ge_warehouse setup, EzyTrack auth check)
+```
+
+## Documentation
+
+| | |
+|---|---|
+| **Architecture** | [`docs/architecture/`](docs/architecture/) -- platform overview, data layers, database architecture, naming conventions, decision record |
+| **Sources** | [`docs/sources/`](docs/sources/) -- one document per source system |
+| **Warehouse** | [`docs/warehouse/`](docs/warehouse/) -- core model, marts, reporting layer, source mapping, `dim_date` |
+| **Operations** | [`docs/operations/`](docs/operations/) -- pipeline operations, monitoring/alerting, retries/recovery, data quality |
+| **Development** | [`docs/development/`](docs/development/) -- local setup, testing, migrations, contribution guide |
+| **Migration** | [`docs/migration/legacy-to-platform-migration.md`](docs/migration/legacy-to-platform-migration.md) -- the full legacy -> platform plan and object inventory |
+| **Security** | [`docs/security/secrets-and-access.md`](docs/security/secrets-and-access.md) |
+| **Glossary** | [`docs/glossary.md`](docs/glossary.md) |
+| **Power BI data dictionary** | [`docs/powerbi_reporting_data_dictionary.md`](docs/powerbi_reporting_data_dictionary.md) -- the live, legacy reporting layer, in full |
+
+Every document distinguishes **IMPLEMENTED** / **PLANNED** / **DEFERRED** /
+**LEGACY** explicitly -- see `docs/architecture/platform-overview.md` for
+what each means.
+
+## Development setup
 
 ```powershell
 Set-Location <path to ge-data-platform>
@@ -48,112 +85,45 @@ python -m pip install -e . --no-deps
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-Fill the project-root `.env` with real credentials and connection details.
-Never commit `.env`; `.gitignore` excludes all `.env*` files except the safe
-`.env.example` template.
+Python 3.13, no virtual environment. Full setup, `.env` precedence, and
+credential policy: `docs/development/local-setup.md` and
+`docs/security/secrets-and-access.md`.
 
-Configuration precedence is:
-
-1. Environment variables already set on the process.
-2. The canonical `<project-root>/.env`.
-3. A legacy `.env` in the current working directory, temporarily supported
-   with a migration warning.
-
-Apply the SQL migrations before enabling the hardened schedules. Existing
-production databases need `sql/legacy/telemetry_migrations/027_add_trackunit_counter_quality.sql`
-followed by `sql/legacy/telemetry_migrations/028_add_sync_run_abandoned_support.sql`; both are
-idempotent. See the
-[reliability operations runbook](docs/reliability_operations.md#migrations)
-for the exact commands and verification queries.
-
-## Run providers manually
+## Running tests
 
 ```powershell
-# Sendem: configured lookback, or an explicit recovery lookback
+python -m pytest
+```
+
+139 tests, mocked HTTP/SQL -- no live credentials required. Full breakdown,
+CLI checks, and live smoke-test procedure: `docs/development/testing.md`.
+
+## Running providers manually
+
+```powershell
 python -m ge_data_platform.sources.sendem.sync
-python -m ge_data_platform.sources.sendem.sync --lookback-days 7
-
-# EzyTrack: cursor-based catch-up, or fixed-window reconciliation
 python -m ge_data_platform.sources.ezytrack.sync
-python -m ge_data_platform.sources.ezytrack.sync --reconcile
-
-# Trackunit: exact day, inclusive range, or rolling recovery
-python -m ge_data_platform.sources.trackunit.daily_activity --date 2026-08-02
-python -m ge_data_platform.sources.trackunit.daily_activity --from-date 2026-07-27 --to-date 2026-08-02
-python -m ge_data_platform.sources.trackunit.daily_activity --rolling-days 1
-python -m ge_data_platform.sources.trackunit.daily_activity --rolling-days 7
-
-# Run after Trackunit activity for a date when location enrichment is needed
-python -m ge_data_platform.sources.trackunit.location --date 2026-08-02
-
-# Accounts: Evolution Project Reports (full extract of GE + TLS every run)
+python -m ge_data_platform.sources.trackunit.daily_activity --rolling-days 2
+python -m ge_data_platform.sources.trackunit.location --date <date>
 python -m ge_data_platform.sources.evolution.project_reports
 ```
 
-The Accounts/Evolution pipeline needs migration
-`sql/legacy/telemetry_migrations/029_create_accounts_evolution_project_reports_schema.sql`
-applied (idempotent, safe to rerun) and the `EVOLUTION_*` variables in `.env`
-filled in -- see `.env.example`.
+Recovery flags, retry behavior, and overlap protection:
+`docs/operations/retries-and-recovery.md`.
 
-```powershell
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\029_create_accounts_evolution_project_reports_schema.sql
-```
-
-See the [operations runbook](docs/reliability_operations.md) before a backfill.
-It covers rate limits, timeouts, safe provider recovery, validation modes,
-Dagster schedules and sensors, alerting, stale `ABANDONED` runs, and SQL for
-inspecting `etl.sync_runs` and `etl.sync_table_loads`.
-
-## GE Warehouse platform baseline (development)
-
-`ge_warehouse` is the new platform database described in
-[`docs/ge_warehouse_architecture.md`](docs/ge_warehouse_architecture.md) --
-schemas, ops metadata, roles, and `core.dim_date` only; no ingestion pipeline
-writes to it yet. `GE_WAREHOUSE_DB` (default `ge_warehouse`) and the shared
-`POSTGRES_HOST`/`POSTGRES_USER`/`POSTGRES_PASSWORD` variables configure it --
-see `.env.example`. To create it and apply every baseline migration:
+## Setting up `ge_warehouse` locally
 
 ```powershell
 python -m scripts.setup_ge_warehouse --all
 ```
 
-Or step by step: `--create-db`, then `--migrate`, then `--validate` (runs
-`sql/validation/validate_ge_warehouse_baseline.sql` and prints every
-PASS/FAIL check). This never touches `telemetry_warehouse`. See
-[`docs/legacy_to_platform_migration_inventory.md`](docs/legacy_to_platform_migration_inventory.md)
-for the full current -> target object mapping.
+Creates the database if missing, applies every `sql/migrations/*.sql` file,
+and validates the result. Never touches `telemetry_warehouse`. Details:
+`docs/development/migrations.md`.
 
-## Validate
+## Migration status
 
-The automated suite mocks provider requests and sleeping; it does not call live
-APIs.
-
-```powershell
-python -m pytest
-python -m ge_data_platform.sources.sendem.sync --help
-python -m ge_data_platform.sources.ezytrack.sync --help
-python -m ge_data_platform.sources.trackunit.daily_activity --help
-python -c "from ge_data_platform.orchestration.definitions import defs; defs.get_repository_def(); print('Dagster definitions loaded')"
-$env:DAGSTER_HOME = '<path to a local Dagster home>'
-dagster job list -m ge_data_platform.orchestration.definitions
-dagster schedule list -m ge_data_platform.orchestration.definitions
-dagster sensor list -m ge_data_platform.orchestration.definitions
-# Equivalent -w form, using the repo's workspace.yaml:
-dagster schedule list -w workspace.yaml
-```
-
-Expect exactly 10 jobs, 7 schedules, and 2 sensors, including the
-`trackunit_intraday_refresh` job and `trackunit_intraday_refresh_schedule`
-(`20 */3 * * *`, `Africa/Harare`).
-
-Live smoke tests are separate: they require valid provider credentials and a
-real PostgreSQL database with the production migrations applied, and they write
-through the normal UPSERT paths. Use the smallest safe windows described in the
-[runbook](docs/reliability_operations.md#live-provider-smoke-tests).
-
-## More documentation
-
-- [Reliability operations runbook](docs/reliability_operations.md)
-- [Dagster production configuration example](dagster.yaml.example)
-- [EzyTrack authentication](docs/ezytrack_telematics_auth.md)
-- [Power BI reporting data dictionary](docs/powerbi_reporting_data_dictionary.md)
+`ge_warehouse` is a validated architecture baseline, running alongside
+`telemetry_warehouse` on the same development Postgres instance. No
+production system reads from or writes to it yet. Full plan and per-object
+inventory: `docs/migration/legacy-to-platform-migration.md`.
