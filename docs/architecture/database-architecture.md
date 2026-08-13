@@ -13,12 +13,12 @@ checks against it). For what each layer *means*, see
 | Schema | Layer | Status | Contents today |
 |---|---|---|---|
 | `raw_trackunit` | raw | IMPLEMENTED | 7 tables, populated -- full historical backfill from `telemetry_warehouse` plus live API data (see `docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed`) |
-| `raw_sendem` | raw | IMPLEMENTED | empty |
+| `raw_sendem` | raw | IMPLEMENTED | 5 tables, populated -- full historical backfill from `telemetry_warehouse` plus live API data (see `docs/migration/legacy-to-platform-migration.md#sendem-migration`) |
 | `raw_ezytrack` | raw | IMPLEMENTED | empty |
 | `raw_evolution` | raw | IMPLEMENTED | empty |
 | `raw_fieldops` | raw | IMPLEMENTED | empty |
 | `stg_trackunit` | staging | IMPLEMENTED | 3 tables, populated -- see `docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed` |
-| `stg_sendem` | staging | IMPLEMENTED | empty |
+| `stg_sendem` | staging | IMPLEMENTED | 5 tables, populated -- includes legacy `clean.sendem_fact_*_daily` history back to 2026-01-01, see `docs/migration/legacy-to-platform-migration.md#sendem-migration` |
 | `stg_ezytrack` | staging | IMPLEMENTED | empty |
 | `stg_evolution` | staging | IMPLEMENTED | empty |
 | `stg_fieldops` | staging | IMPLEMENTED | empty |
@@ -61,6 +61,32 @@ for the full backfill/validation procedure and results.
 `data_quality_status` as real, populated columns from the start -- unlike
 legacy `staging.trackunit_daily_activity`, which never actually got these
 columns (see `docs/operations/data-quality.md`).
+
+### `raw_sendem` / `stg_sendem` tables
+
+Second source fully migrated -- see
+`docs/migration/legacy-to-platform-migration.md#sendem-migration` for the
+full backfill/validation procedure and results.
+
+| Table | Row count (dev, after historical backfill + one live sync) |
+|---|---|
+| `raw_sendem.asset` | 258 |
+| `raw_sendem.site` | 168 |
+| `raw_sendem.event_description` | 114 |
+| `raw_sendem.trip_daily` | 1,998 (rolling window only, 2026-06-24 onward) |
+| `raw_sendem.event_daily` | 17,451 (rolling window only, 2026-06-24 onward) |
+| `stg_sendem.asset` | 258 |
+| `stg_sendem.site` | 168 |
+| `stg_sendem.event_type` | 122 (includes 2 inferred "Unknown Sendem Event Type" placeholder rows) |
+| `stg_sendem.trip_daily` | 13,437 (2026-01-01 onward -- legacy `clean.sendem_fact_trips_daily` history folded in) |
+| `stg_sendem.event_daily` | 123,639 (2026-01-01 onward -- legacy `clean.sendem_fact_events_daily` history folded in) |
+
+`raw_sendem.trip_daily`/`event_daily` intentionally do NOT carry the
+`clean.*` history -- `clean.*` predates `site_id` on the asset dimension and
+is already staging-shaped (enriched with site/asset attributes), not
+raw-shaped, so it has no raw-layer counterpart. Only `stg_sendem.trip_daily`/
+`event_daily` carry the full 2026-01-01 history. See
+`docs/migration/legacy-to-platform-migration.md#sendem-migration`.
 
 ### `ops` tables
 
@@ -115,7 +141,7 @@ for contrast.
 |---|---|
 | `raw` | Provider-shaped ETL tables, shared indiscriminately across Sendem/EzyTrack/Trackunit/Evolution |
 | `staging` | Cleaned/enriched provider tables |
-| `clean` | Pre-existing historical Sendem backfill (2026-01-01..2026-06-30); no running job writes to it |
+| `clean` | Pre-existing historical Sendem backfill (2026-01-01..2026-06-30); no running job writes to it. Its exclusive history is now also folded into `ge_warehouse`'s `stg_sendem.trip_daily`/`event_daily` -- see `docs/migration/legacy-to-platform-migration.md#sendem-migration`. `telemetry_warehouse.clean` itself is untouched (read-only source). |
 | `etl` | `sync_runs` / `sync_table_loads` -- the legacy equivalent of `ops.pipeline_run` / `ops.table_load` |
 | `reporting` | Power BI-facing views (documented in full in `docs/powerbi_reporting_data_dictionary.md`) |
 | `warehouse` | Dead: created by an early migration, superseded by `reporting` before ever being used; confirmed empty in the live catalog |

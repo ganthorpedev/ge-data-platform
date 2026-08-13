@@ -8,15 +8,17 @@ document written when `ge_warehouse`'s baseline was first created; that
 content lives here now, kept current alongside the rest of the
 documentation instead of drifting in a separate file.
 
-**Status: baseline + Trackunit raw/staging migrated and validated.**
-Trackunit's historical `raw`/`staging` data has been migrated into
-`raw_trackunit`/`stg_trackunit` in `ge_warehouse`, with full reconciliation
-against `telemetry_warehouse` and a real fresh-ingestion test -- see
-[Trackunit migration (completed)](#trackunit-migration-completed) below.
-Sendem, EzyTrack, Evolution, and FieldOps have not moved. No Dagster
-schedule writes to `ge_warehouse` -- `telemetry_warehouse` remains the only
-database any *scheduled* job or Power BI report actually uses; Trackunit's
-platform-target code path exists but is exercised only by manual
+**Status: baseline + Trackunit + Sendem raw/staging migrated and validated.**
+Trackunit's and Sendem's historical `raw`/`staging` data have been migrated
+into `raw_trackunit`/`stg_trackunit` and `raw_sendem`/`stg_sendem` in
+`ge_warehouse`, with full reconciliation against `telemetry_warehouse` and a
+real fresh-ingestion test for each -- see
+[Trackunit migration (completed)](#trackunit-migration-completed) and
+[Sendem migration (completed)](#sendem-migration-completed) below. EzyTrack,
+Evolution, and FieldOps have not moved. No Dagster schedule writes to
+`ge_warehouse` -- `telemetry_warehouse` remains the only database any
+*scheduled* job or Power BI report actually uses; Trackunit's and Sendem's
+platform-target code paths exist but are exercised only by manual
 invocation.
 
 ## The principle
@@ -48,8 +50,8 @@ flowchart TD
 |---|---|---|
 | `telemetry_warehouse` | Live production, unchanged throughout | ONGOING (LEGACY) |
 | parallel `ge_warehouse` | Schemas, `ops` metadata structure, roles, `core.dim_date` | IMPLEMENTED |
-| source-by-source migration | Each source's ingestion ported to write `raw_<source>`/`stg_<source>` | IN PROGRESS -- Trackunit done (raw/staging only); Sendem/EzyTrack/Evolution/FieldOps NOT STARTED |
-| validation | Row counts, spot checks, comparison queries between old and new for the same window | DONE for Trackunit (`scripts/validate_trackunit_migration.py`); NOT STARTED for other sources |
+| source-by-source migration | Each source's ingestion ported to write `raw_<source>`/`stg_<source>` | IN PROGRESS -- Trackunit and Sendem done (raw/staging only); EzyTrack/Evolution/FieldOps NOT STARTED |
+| validation | Row counts, spot checks, comparison queries between old and new for the same window | DONE for Trackunit (`scripts/validate_trackunit_migration.py`) and Sendem (`scripts/validate_sendem_migration.py`); NOT STARTED for other sources |
 | `core` | Cross-source conformance (`dim_asset` first, then facts) built on validated staging data | NOT STARTED -- blocked on source-map design, `docs/warehouse/source-mapping.md` |
 | marts | `mart_<domain>` objects built on `core` | NOT STARTED |
 | consumer cutover | Power BI/Excel/applications repointed from `telemetry_warehouse.reporting` to the new `reporting` schema | NOT STARTED |
@@ -97,11 +99,11 @@ object's *logic*, not its DDL, gets rebuilt once `core` exists under it).
 | `raw.trackunit_aemp_locations` | `raw_trackunit.aemp_location` | **migrated + validated** | 28,501 rows |
 | `raw.trackunit_site_history` | `raw_trackunit.site_history` | **migrated + validated** | 39 rows |
 | `raw.trackunit_sites` | `raw_trackunit.site` | **migrated + validated** | 11 rows |
-| `raw.sendem_assets` | `raw_sendem.asset` | structural-only | 257 rows; re-fetchable |
-| `raw.sendem_sites` | `raw_sendem.site` | structural-only | 168 rows |
-| `raw.sendem_event_descriptions` | `raw_sendem.event_description` | structural-only | 114 rows |
-| `raw.sendem_trips_assets_daily` | `raw_sendem.trip_daily` | structural-only | 1,906 rows; not re-fetchable (rolling API window) |
-| `raw.sendem_events_assets_daily` | `raw_sendem.event_daily` | structural-only | 16,285 rows; not re-fetchable |
+| `raw.sendem_assets` | `raw_sendem.asset` | **migrated + validated** | 257 rows (+1 from live-ingestion testing); re-fetchable |
+| `raw.sendem_sites` | `raw_sendem.site` | **migrated + validated** | 168 rows |
+| `raw.sendem_event_descriptions` | `raw_sendem.event_description` | **migrated + validated** | 114 rows |
+| `raw.sendem_trips_assets_daily` | `raw_sendem.trip_daily` | **migrated + validated** | 1,906 historical rows (+ live rows from fresh-ingestion testing); not re-fetchable (rolling API window) -- no `clean.*` history (raw-shaped only, see below) |
+| `raw.sendem_events_assets_daily` | `raw_sendem.event_daily` | **migrated + validated** | 16,285 historical rows (+ live rows from fresh-ingestion testing); not re-fetchable |
 | `raw.ezytrack_assets` | `raw_ezytrack.asset` | structural-only | 51 rows |
 | `raw.ezytrack_trips` | `raw_ezytrack.trip` | structural-only | 823 rows |
 | `raw.evolution_project_reports` (defined; not yet applied on the local dev database) | `raw_evolution.project_report` | structural-only | Full-refresh source, always re-derivable from the live view |
@@ -114,8 +116,8 @@ object's *logic*, not its DDL, gets rebuilt once `core` exists under it).
 | `staging.trackunit_dim_assets` | `stg_trackunit.asset` | **migrated + validated** | 107 rows |
 | `staging.trackunit_daily_activity` | `stg_trackunit.daily_activity` | **migrated + validated, with a documented correction** | 856 historical rows; 230 carry a corrected `counter_reset_detected`/`data_quality_status` the legacy row never had -- see [Trackunit migration (completed)](#trackunit-migration-completed) |
 | `staging.trackunit_location_enrichment` | `stg_trackunit.location_enrichment` | **migrated + validated** | 105 rows; address/zip/city/country stay NULL (V1) |
-| `staging.sendem_dim_assets` / `_dim_sites` / `_dim_event_types` | `stg_sendem.asset` / `.site` / `.event_type` | structural-only | 257 / 168 / 120 rows |
-| `staging.sendem_fact_trips_daily` / `_fact_events_daily` | `stg_sendem.trip_daily` / `.event_daily` | structural-only | 1,906 / 16,285 rows |
+| `staging.sendem_dim_assets` / `_dim_sites` / `_dim_event_types` | `stg_sendem.asset` / `.site` / `.event_type` | **migrated + validated** | 257 / 168 / 120 rows (+2 inferred placeholder event types, see below) |
+| `staging.sendem_fact_trips_daily` / `_fact_events_daily` | `stg_sendem.trip_daily` / `.event_daily` | **migrated + validated, with legacy `clean.*` history folded in** | 1,906 / 16,285 rolling-window rows + 11,439 / 106,188 exclusive historical rows from `clean.*` -- see [Sendem migration (completed)](#sendem-migration-completed) |
 | `staging.ezytrack_dim_assets` | `stg_ezytrack.asset` | structural-only | 51 rows |
 | `staging.ezytrack_fact_trips` | `stg_ezytrack.trip` | structural-only | 823 rows |
 | -- (no staging step today; `raw.evolution_project_reports` already carries `business_unit`) | `stg_evolution.project_report` | deferred | Would need a definition of what "cleaning" adds beyond what raw already does |
@@ -124,9 +126,20 @@ object's *logic*, not its DDL, gets rebuilt once `core` exists under it).
 
 | Current | Target | Method | Notes |
 |---|---|---|---|
-| `clean.sendem_dim_assets` / `_dim_sites` / `_dim_event_types` | `core.dim_asset` / `dim_site` (conformed) | deferred (conformance needed) | 257 / 165 / 114 rows; one-time historical, must not be silently dropped; predates the event-type-inference fix in `002_create_sendem_warehouse_views.sql` |
-| `clean.sendem_fact_trips_daily` | `core.fact_trip` / `fact_asset_daily_activity` | deferred (conformance needed) | 12,016 rows; not re-fetchable from the API |
-| `clean.sendem_fact_events_daily` | (event component of the above) | deferred (conformance needed) | 111,122 rows; not re-fetchable |
+| `clean.sendem_dim_assets` / `_dim_sites` / `_dim_event_types` | -- (not separately migrated) | **investigated -- confirmed redundant** | 257 / 165 / 114 rows; key-set diff against `staging.sendem_dim_*` found **zero** ids exclusive to `clean` (0/0/0) -- proper subsets of current staging dims, carrying no unique master-data value. See [Sendem migration (completed)](#sendem-migration-completed). |
+| `clean.sendem_fact_trips_daily` | `stg_sendem.trip_daily` | **migrated + validated** | 12,016 rows (2026-01-01 to 2026-06-30); not re-fetchable from the API. 11,439 exclusive keys folded in; 577 overlapping keys resolved in favor of `staging`'s live-pipeline value (float-precision drift only, not a business difference). No `core` conformance needed -- this is staging-grade, already-enriched data, folded straight into `stg_sendem`. |
+| `clean.sendem_fact_events_daily` | `stg_sendem.event_daily` | **migrated + validated** | 111,122 rows; not re-fetchable. 106,188 exclusive keys folded in; 4,934 overlapping keys resolved the same way. 2 `event_type_id`s (41 rows) referenced by no dimension anywhere were resolved with inferred "Unknown Sendem Event Type" placeholder rows. |
+
+**Note on `core` conformance:** the original assumption in this table (when
+only Trackunit had been investigated) was that `clean.*`'s history would
+need `core.dim_asset`/`core.fact_trip` conformance before it could be
+preserved. The actual Sendem investigation found this unnecessary: `clean.*`
+is shape-identical to `staging.sendem_fact_*_daily` (same grain, same
+enrichment, an added `source_system` column) with no cross-source
+conformance to do -- it is single-source, staging-grade data, not derived
+business data, so it belongs in `stg_sendem` directly. `core`/`mart_*` are
+still not built in this phase (see "What this phase intentionally did not
+do" below).
 
 ### Legacy `warehouse` schema (dead)
 
@@ -297,11 +310,171 @@ existing UPSERT semantics hold unchanged under the platform target.
 - `ops.pipeline_run`/`ops.table_load` are not written to for platform-target
   runs (sync tracking is skipped, not redirected).
 
+## Sendem migration (completed)
+
+The second real source migration: `raw.sendem_*`/`staging.sendem_*` ->
+`raw_sendem.*`/`stg_sendem.*` in `ge_warehouse`, PLUS folding in legacy
+`clean.sendem_fact_trips_daily`/`_events_daily` history that exists nowhere
+else. `core`/`mart_fleet` were deliberately **not** touched -- this phase
+stops at staging, same as Trackunit.
+
+### Legacy objects found (inventory, before any DDL)
+
+Verified against the live `telemetry_warehouse` catalog (read-only session):
+5 `raw.sendem_*` tables, 5 `staging.sendem_*` tables, 5 `clean.sendem_*`
+tables, 5 `reporting.vw_sendem_*` views (untouched by this migration), and
+`warehouse.*` confirmed empty (dead, no target). No object beyond this list
+exists. Row counts, keys (all single-column or composite `PRIMARY KEY`, no
+extra `UNIQUE`/`FOREIGN KEY` constraints, matching the applied DDL exactly),
+and indexes (each table's PK index only) were inventoried before writing any
+migration -- see the object tables above for the full mapping and counts.
+
+`clean.*` predates `raw_sendem.asset`/`stg_sendem.asset`'s `site_id` column
+(confirmed absent from `clean.sendem_dim_assets`) and is already enriched
+with site/asset attributes (fleet_number, registration_number, site_name,
+etc.) -- i.e. staging-shaped, not raw-shaped. A key-set diff against current
+`staging.sendem_dim_*` found it to be a strict subset on every dimension
+(assets: 257/257 common, 0 exclusive either side; sites: 165 common, 0
+`clean`-exclusive, 3 `staging`-exclusive; event types: 114 common, 0
+`clean`-exclusive, 6 `staging`-exclusive) -- classified as **normalized
+staging data, confirmed redundant on the dimension side**, with **genuine,
+irreplaceable history on the fact side** (`clean.sendem_fact_trips_daily`/
+`_events_daily`, 2026-01-01 to 2026-06-30, all 181 days present with no
+gaps).
+
+### New objects created
+
+`sql/migrations/007_create_raw_sendem.sql` (5 tables) and
+`008_create_stg_sendem.sql` (5 tables), applied via
+`python -m scripts.setup_ge_warehouse --migrate`. Table names drop the
+redundant `sendem_` prefix (the schema already identifies the source),
+matching the Trackunit precedent; column shapes otherwise mirror the
+*current* live `raw.sendem_*`/`staging.sendem_*` shape (not the older shape
+`clean.*`/`sql/legacy/telemetry_migrations/sendem_tables.sql` used).
+
+### How legacy `clean.*` history was handled
+
+- **Dims (`clean.sendem_dim_assets`/`_dim_sites`/`_dim_event_types`): NOT
+  copied.** Confirmed redundant by the key-set diff above -- copying them
+  would add zero unique asset/site/event-type ids, and dims are
+  current-state master data, not a time series, so there is no history to
+  lose by skipping them.
+- **Facts (`clean.sendem_fact_trips_daily`/`_events_daily`): migrated into
+  `stg_sendem.trip_daily`/`event_daily`, not `raw_sendem`.** `clean.*` has
+  no raw-shaped counterpart (it was never the API's raw response, already
+  enriched at the point it was captured), so it has nothing to contribute to
+  `raw_sendem`, which stays a faithful mirror of the current live
+  `raw.sendem_*` rolling window only.
+- **Overlap resolution:** `scripts/backfill_sendem_historical.py` loads
+  legacy `staging` fact rows first, then merges `clean` rows via
+  `INSERT ... ON CONFLICT (<pk>) DO NOTHING`. On the 577 trip / 4,934 event
+  `(date_key, group_id, site_id, asset_id[, event_type_id])` keys present in
+  *both* sources (the 2026-06-24..06-30 overlap window), `staging`'s
+  live-pipeline value is kept; sampled differences were float-precision
+  drift only (e.g. `112.7` vs `112.69999999999999`), never a business-content
+  difference. Only `clean`'s 11,439 / 106,188 **exclusive** keys (2026-01-01
+  to 2026-06-23) actually extend history.
+- **Orphaned event types:** `clean.sendem_fact_events_daily` references 2
+  `event_type_id`s (41 rows total) present in **no** dimension table
+  anywhere -- not `raw`, not `clean`'s own dim, not current `staging`.
+  `apply_inferred_event_types()` in the backfill script synthesizes the same
+  `"Unknown Sendem Event Type"` / `event_category='unknown'` placeholder row
+  `ge_data_platform.sources.sendem.transform.build_dim_event_types()`
+  produces for this exact situation live, so no fact row is orphaned.
+
+### Historical backfill and reconciliation results
+
+`scripts/backfill_sendem_historical.py` (local-only, read-only against
+`telemetry_warehouse`, `INSERT ... ON CONFLICT DO NOTHING`, restart-safe)
+copied all 5 raw tables, all 5 staging tables, and merged both `clean.*`
+fact tables. `scripts/validate_sendem_migration.py` independently
+reconciles both databases object-by-object (row counts, key parity, null
+profiles, numeric sums, date/time coverage, and -- for the two merged fact
+tables -- an independent recomputation of `union(staging, clean)` plus a
+row-by-row check that every `staging` key's *value* survived unchanged and
+every `clean`-exclusive key's value survived unchanged):
+
+```text
+SENDEM HISTORICAL MIGRATION VALIDATION
+
+raw_sendem.asset                                      PASS
+raw_sendem.site                                       PASS
+raw_sendem.event_description                          PASS
+raw_sendem.trip_daily                                 PASS
+raw_sendem.event_daily                                PASS
+stg_sendem.asset                                       PASS
+stg_sendem.site                                        PASS
+stg_sendem.event_type                                  PASS
+stg_sendem.trip_daily                                  PASS
+stg_sendem.event_daily                                 PASS
+clean.* dims (not migrated -- subset confirmation)      PASS
+
+Overall: PASS
+```
+
+Every check passed with **zero tolerance** -- exact row counts, exact key
+parity, exact numeric sums (`total_trip_distance_kilometres`,
+`total_event_occurrences`), exact date/time coverage, and exact
+row-for-row value equality on both the `staging`-wins overlap resolution and
+the `clean`-exclusive historical rows. No discrepancy was hidden behind a
+tolerance band anywhere.
+
+Re-running the backfill script a second time (idempotency test) inserted
+`0` new rows into every one of the 5 raw + 5 staging tables (`read N,
+inserted 0` throughout, including the `clean` merge step and the inferred
+event-type step reporting "No orphaned event_type_ids found"); re-running
+the full reconciliation afterward still reported `Overall: PASS`.
+
+### Fresh-ingestion test
+
+After historical parity passed, `sync.py` was adapted (not forked -- see
+`docs/sources/sendem.md#ge_warehouse-platform-target`) to support
+`--target platform`, then run live once:
+
+```powershell
+python -m ge_data_platform.sources.sendem.sync --target platform --lookback-days 1
+```
+
+against `ge_warehouse` / `raw_sendem` + `stg_sendem`, window 20260812 to
+20260813 (the smallest window `--lookback-days` supports), with no Dagster
+schedule involved. Result: SUCCESS, 258 assets (1 new asset appeared live,
+not present in the earlier snapshot -- real-world drift, not a defect), 92
+trip rows and 1,166 event rows loaded into both `raw_sendem` and
+`stg_sendem`. `telemetry_warehouse`'s own Sendem sync had not advanced past
+2026-08-03 at the time of this test (confirmed by direct inspection), so no
+legacy comparison is possible for the 2026-08-12/13 window -- stated here
+rather than invented. Historical rows (2026-01-01 to 2026-08-03) were
+confirmed unchanged and un-duplicated after the live run.
+
+Re-running the identical command a second time produced the same row counts
+(`raw_sendem.trip_daily` stayed at 1,998 total rows, `event_daily` at
+17,451; `stg_sendem.trip_daily`/`event_daily` stayed at 13,437/123,639) and
+the same business values (verified row-for-row on a sample) -- only
+`loaded_at` audit timestamps advanced to the second run's single load
+timestamp -- confirming the existing UPSERT semantics hold unchanged under
+the platform target. `ops.pipeline_run`/`ops.table_load` stayed at 0 rows
+across both runs (sync tracking is skipped, not redirected, for the
+platform target).
+
+### What was intentionally not done in the Sendem phase
+
+- `core.dim_asset`/`core.asset_source_map` -- not built (clean.* facts
+  needed no cross-source conformance to preserve -- see the "Note on `core`
+  conformance" above).
+- `mart_fleet.*` -- not built.
+- No Dagster schedule points at `ge_warehouse`; `--target platform` is
+  manual-only.
+- Legacy Sendem code/tables were not removed or altered; `telemetry_warehouse.clean`
+  itself is untouched (read-only source, not modified or dropped).
+- `ops.pipeline_run`/`ops.table_load` are not written to for platform-target
+  runs (sync tracking is skipped, not redirected).
+- `reporting.vw_sendem_*` views were not touched or ported.
+
 ## What this phase intentionally did not do
 
-- No row of Sendem, EzyTrack, Evolution, or FieldOps application data copied
-  from `telemetry_warehouse` into `ge_warehouse` (Trackunit is the one
-  exception -- see above).
+- No row of EzyTrack, Evolution, or FieldOps application data copied from
+  `telemetry_warehouse` into `ge_warehouse` (Trackunit and Sendem are the
+  two exceptions -- see above).
 - No `core` object except `core.dim_date`.
 - No `core.*_source_map` table (pattern chosen, not built -- see
   `docs/warehouse/source-mapping.md`).

@@ -1,7 +1,13 @@
 # Sendem / MiX
 
-**Status: IMPLEMENTED and running against `telemetry_warehouse` (LEGACY
-target database). Not yet ported to `raw_sendem`/`stg_sendem`.**
+**Status: IMPLEMENTED. Production Dagster schedule still writes only to
+`telemetry_warehouse` (LEGACY target, default). `raw_sendem`/`stg_sendem`
+also exist in `ge_warehouse` now, historically backfilled (including six
+months of legacy `clean.*` history the rolling-window API sync never
+re-derives) and validated, and the same code can write there via
+`--target platform` -- opt-in, not the default, not wired to any schedule.
+See `docs/migration/legacy-to-platform-migration.md#sendem-migration` for
+the full migration record.**
 
 Source system for fleet telemetry (trips and driving events), via the
 Sendem/MiX Customer Insights API. Feeds the **Fleet** business domain
@@ -80,3 +86,40 @@ SQLAlchemy/psycopg2 path this loader uses.
 
 `sendem_sync_schedule`, every 3 hours (`35 */3 * * *`, `Africa/Harare`). See
 `docs/operations/pipeline-operations.md#dagster-jobs-and-schedules`.
+
+## `ge_warehouse` platform target
+
+**Status: IMPLEMENTED, opt-in, not scheduled.**
+
+`ge_data_platform.sources.sendem.sync` accepts `--target {legacy,platform}`
+(default `legacy` -- current behavior, unchanged):
+
+```powershell
+python -m ge_data_platform.sources.sendem.sync --target platform
+python -m ge_data_platform.sources.sendem.sync --target platform --lookback-days 1
+```
+
+`--target platform`:
+
+- writes to `raw_sendem.*`/`stg_sendem.*` in `ge_warehouse` instead of
+  `raw.*`/`staging.*` in `telemetry_warehouse` (same client/transform code,
+  same retry/empty-payload/UPSERT behavior -- only the destination
+  schema/table names and database differ, via
+  `PostgresLoader.from_platform_settings` and the `target=` parameter on
+  `load_sendem_tables` in `common/database.py`);
+- skips `etl.sync_runs`/`etl.sync_table_loads` bookkeeping (`ops.pipeline_run`/
+  `ops.table_load` are not yet wired -- see
+  `docs/operations/pipeline-operations.md`);
+- skips post-load validation (its checks are hardcoded to legacy schema
+  names).
+
+No Dagster job or schedule passes `--target platform`; it is exercised only
+by manual invocation today. `stg_sendem.trip_daily`/`stg_sendem.event_daily`
+additionally carry historical rows folded in from legacy
+`clean.sendem_fact_trips_daily`/`_events_daily` (2026-01-01 onward) by
+`scripts/backfill_sendem_historical.py` -- a live platform-target sync
+UPSERTs on the same natural key as any other row, so it can never duplicate
+or conflict with that history. See
+`docs/migration/legacy-to-platform-migration.md#sendem-migration` for the
+historical backfill, reconciliation, and a real fresh-ingestion test run
+against it.

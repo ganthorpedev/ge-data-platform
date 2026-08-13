@@ -137,7 +137,14 @@ project root.
 
 ```powershell
 python -m ge_data_platform.sources.sendem.sync --lookback-days 14
+python -m ge_data_platform.sources.sendem.sync --target platform --lookback-days 1   # ge_warehouse, opt-in, not scheduled
 ```
+
+`--target platform` writes to `raw_sendem.*`/`stg_sendem.*` in `ge_warehouse`
+instead of `raw.*`/`staging.*` in `telemetry_warehouse` -- same fetch/
+transform/retry/empty-payload behavior, opt-in and manual-only (no Dagster
+schedule passes it), same pattern as Trackunit's `--target platform`. See
+`docs/migration/legacy-to-platform-migration.md#sendem-migration`.
 
 **EzyTrack** -- normal catch-up, or reconciliation for a gap the catch-up
 cap can't reach:

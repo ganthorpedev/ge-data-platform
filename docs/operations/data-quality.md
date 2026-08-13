@@ -3,7 +3,11 @@
 **Status: mixed** -- see each section. All IMPLEMENTED behavior below runs
 against `telemetry_warehouse` unless noted otherwise; Trackunit counter-reset
 handling also runs against `ge_warehouse` (`raw_trackunit`/`stg_trackunit`,
-opt-in via `--target platform` -- see `docs/sources/trackunit.md`).
+opt-in via `--target platform` -- see `docs/sources/trackunit.md`). Sendem
+ingestion also runs against `ge_warehouse` (`raw_sendem`/`stg_sendem`,
+opt-in via `--target platform` -- see `docs/sources/sendem.md`), though its
+bounded post-load validation checks are skipped for that target (hardcoded
+to legacy schema names, same as Trackunit's).
 
 ## Counter reset handling
 
@@ -39,6 +43,25 @@ starts from the corrected state 027 always intended -- 230 rows there are
 `COUNTER_RESET`, a documented, verified divergence from the (still-uncorrected)
 legacy value for those same rows. `scripts/validate_trackunit_migration.py`
 checks this independently rather than trusting the backfill's own output.
+
+**Discovered during the Sendem `raw_sendem`/`stg_sendem` migration** (see
+`docs/migration/legacy-to-platform-migration.md#sendem-migration`): legacy
+`telemetry_warehouse.clean.sendem_fact_trips_daily`/`_events_daily` hold six
+months of history (2026-01-01 to 2026-06-30) that the live incremental API
+sync never re-derives (it only ever carries a rolling window). Left alone,
+migrating only `raw`/`staging` would have silently dropped that history.
+`scripts/backfill_sendem_historical.py` folds `clean.*`'s exclusive keys
+into `stg_sendem.trip_daily`/`event_daily` (legacy `staging` loads first and
+always wins on the ~577/~4,934 overlapping keys -- `clean` and `staging`
+independently re-derived the same June 2026 days and differ by float
+precision only, not business content); `scripts/validate_sendem_migration.py`
+independently recomputes the expected `staging ∪ clean` union and the
+overlap-resolution outcome, rather than trusting the backfill's own
+bookkeeping. Separately, 2 `event_type_id`s referenced only by
+`clean.sendem_fact_events_daily` (41 rows) exist in no dimension table
+anywhere; the backfill synthesizes the same "Unknown Sendem Event Type"
+inferred placeholder row `ge_data_platform.sources.sendem.transform.build_dim_event_types()`
+would produce live, so no fact row is left orphaned.
 
 ## Validation SQL philosophy
 
