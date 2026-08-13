@@ -4,9 +4,9 @@ Used by the Sendem and EzyTrack connectors (and the Trackunit token request
 indirectly via the same policy values). Retries apply ONLY to transient
 failures: connection errors, timeouts, and HTTP 500/502/503/504. Ordinary
 4xx responses are never retried by the adapter. Trackunit's 401 refresh and
-429 backoff are provider-specific and live in connectors/trackunit_client.py
--- that client deliberately does NOT use this adapter, so retries are never
-doubled up.
+429 backoff are provider-specific and live in
+ge_data_platform.sources.trackunit.client -- that client deliberately does
+NOT use this adapter, so retries are never doubled up.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from config.settings import HttpSettings, get_http_settings
+from ge_data_platform.config.settings import HttpSettings, get_http_settings
 
 TRANSIENT_STATUS_CODES = (500, 502, 503, 504)
 

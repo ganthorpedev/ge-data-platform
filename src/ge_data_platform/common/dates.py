@@ -68,7 +68,8 @@ def local_day_to_utc_window(
     Returns (start_utc, end_utc) as ISO-8601 UTC strings (e.g.
     "2026-06-30T22:00:00Z"): start is inclusive (local midnight), end is
     exclusive (the next local midnight). This is the single source of truth
-    for report-day windows -- transforms.trackunit_transform delegates here.
+    for report-day windows -- ge_data_platform.sources.trackunit.transform
+    delegates here.
     """
     tz = ZoneInfo(timezone_name)
     local_start = datetime.combine(report_date, time.min, tzinfo=tz)

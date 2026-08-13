@@ -18,8 +18,8 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-from config.settings import Settings
-from utils.dates import utc_now
+from ge_data_platform.config.settings import Settings
+from ge_data_platform.common.dates import utc_now
 
 logger = logging.getLogger(__name__)
 

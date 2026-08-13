@@ -24,8 +24,8 @@ from typing import BinaryIO, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-LOCK_DIRECTORY = PROJECT_ROOT / ".telemetry_etl_locks"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+LOCK_DIRECTORY = PROJECT_ROOT / ".ge_data_platform_locks"
 
 # Private process-contract variable set only in the environment copy passed to
 # a Dagster-launched child.  It is never written to the parent process's

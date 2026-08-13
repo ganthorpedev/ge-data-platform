@@ -1,4 +1,4 @@
-"""Centralized environment configuration for the telemetry ETL project.
+"""Centralized environment configuration for the GE Data Platform.
 
 All secrets and environment-specific values must be read here via environment
 variables (loaded from a `.env` file). Never hardcode credentials in code.
@@ -16,14 +16,15 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-# The canonical .env lives at the telemetry_etl project root (next to this
-# package). It is loaded by absolute path so behaviour does not depend on the
-# current working directory. Precedence order (highest wins):
+# The canonical .env lives at the repository root (sibling to src/, sql/,
+# tests/), not inside the installed package. It is loaded by absolute path so
+# behaviour does not depend on the current working directory. Precedence
+# order (highest wins):
 #   1. Real environment variables already set on the process.
 #   2. The canonical <project root>/.env.
 #   3. A legacy .env in the current working directory (warned about, temporary
 #      backward compatibility only).
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CANONICAL_ENV_PATH = PROJECT_ROOT / ".env"
 
 _env_loaded = False
@@ -172,7 +173,7 @@ def validate_evolution_view_name(view_name: str) -> str:
     """Validate a configurable Evolution view/table name and bracket-quote it.
 
     `view_name` (EVOLUTION_PROJECT_REPORTS_VIEW) is substituted directly into
-    a SQL `FROM` clause by connectors/accounts/evolution/project_reports.py,
+    a SQL `FROM` clause by ge_data_platform.sources.evolution.project_reports,
     so it must never be allowed to carry arbitrary SQL. Only a plain
     "schema.object" identifier is accepted (e.g. "dbo.vwProjectsReports");
     anything else -- extra parts, whitespace, semicolons, comments, brackets
@@ -491,7 +492,7 @@ class EvolutionSettings:
     GE and TLS are two databases on the *same* SQL Server instance, reached
     with the same driver/credentials -- only `database` differs per company.
     `sources` is therefore a tuple, not two separate settings objects, so
-    connectors/accounts/evolution code can loop over it instead of
+    ge_data_platform.sources.evolution code can loop over it instead of
     duplicating a fetch path per company.
     """
 
@@ -521,7 +522,7 @@ def get_evolution_settings() -> EvolutionSettings:
     raw_view_name = os.getenv("EVOLUTION_PROJECT_REPORTS_VIEW", DEFAULT_EVOLUTION_PROJECT_REPORTS_VIEW)
     # Fail fast on a bad configuration value; the canonical (unbracketed,
     # stripped) form is what gets stored, re-validated and bracket-quoted
-    # again immediately before use in connectors.accounts.evolution.
+    # again immediately before use in ge_data_platform.sources.evolution.
     validate_evolution_view_name(raw_view_name)
 
     return EvolutionSettings(
