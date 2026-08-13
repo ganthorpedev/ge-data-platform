@@ -50,6 +50,31 @@ _PLATFORM_TRACKUNIT_TABLES = {
     "staging_dim_assets": ("stg_trackunit", "asset"),
     "staging_daily_activity": ("stg_trackunit", "daily_activity"),
 }
+_LEGACY_SENDEM_TABLES = {
+    "raw_assets": ("raw", "sendem_assets"),
+    "raw_sites": ("raw", "sendem_sites"),
+    "raw_event_descriptions": ("raw", "sendem_event_descriptions"),
+    "raw_trips": ("raw", "sendem_trips_assets_daily"),
+    "raw_events": ("raw", "sendem_events_assets_daily"),
+    "staging_dim_assets": ("staging", "sendem_dim_assets"),
+    "staging_dim_sites": ("staging", "sendem_dim_sites"),
+    "staging_dim_event_types": ("staging", "sendem_dim_event_types"),
+    "staging_fact_trips": ("staging", "sendem_fact_trips_daily"),
+    "staging_fact_events": ("staging", "sendem_fact_events_daily"),
+}
+_PLATFORM_SENDEM_TABLES = {
+    "raw_assets": ("raw_sendem", "asset"),
+    "raw_sites": ("raw_sendem", "site"),
+    "raw_event_descriptions": ("raw_sendem", "event_description"),
+    "raw_trips": ("raw_sendem", "trip_daily"),
+    "raw_events": ("raw_sendem", "event_daily"),
+    "staging_dim_assets": ("stg_sendem", "asset"),
+    "staging_dim_sites": ("stg_sendem", "site"),
+    "staging_dim_event_types": ("stg_sendem", "event_type"),
+    "staging_fact_trips": ("stg_sendem", "trip_daily"),
+    "staging_fact_events": ("stg_sendem", "event_daily"),
+}
+
 _LEGACY_TRACKUNIT_LOCATION_TABLES = {
     "raw_locations": ("raw", "trackunit_aemp_locations"),
     "raw_site_history": ("raw", "trackunit_site_history"),
@@ -599,6 +624,7 @@ class PostgresLoader:
         dataframes: dict[str, pd.DataFrame],
         sync_run_id: str | None = None,
         provider: str = "sendem",
+        target: str = "legacy",
     ) -> dict[str, int]:
         """Load all Sendem raw and staging tables from the given dataframes.
 
@@ -606,44 +632,59 @@ class PostgresLoader:
         dim_event_types_df, trips_df, events_df, fact_trips, fact_events.
 
         `event_desc_df` (raw, exactly what the Sendem API returned) feeds
-        raw.sendem_event_descriptions. `dim_event_types_df` (event_desc_df
+        the raw event-descriptions table. `dim_event_types_df` (event_desc_df
         plus inferred "unknown" rows for event_type_ids seen in fact data but
-        missing from the real descriptions) feeds staging.sendem_dim_event_types,
-        so fact rows always join cleanly without raw ever being mutated.
+        missing from the real descriptions) feeds the staging event-type
+        dimension, so fact rows always join cleanly without raw ever being
+        mutated.
+
+        `target` selects which schema/table names to write to: "legacy"
+        (default, unchanged behavior) writes raw.sendem_* / staging.sendem_*
+        in telemetry_warehouse; "platform" writes raw_sendem.* / stg_sendem.*
+        in ge_warehouse (see sql/migrations/007_create_raw_sendem.sql and
+        008_create_stg_sendem.sql). The column shapes are identical either
+        way -- only the destination schema/table names and database differ.
+        stg_sendem.trip_daily/event_daily also carry historical rows folded
+        in by scripts/backfill_sendem_historical.py (see
+        docs/migration/legacy-to-platform-migration.md#sendem-migration); a
+        live platform-target load UPSERTs on the same natural key as any
+        other row, so it never duplicates or conflicts with that history.
 
         If `sync_run_id` is given, each table load is separately recorded in
-        etl.sync_table_loads. See _run_load_plan for details.
+        etl.sync_table_loads (legacy target only -- see
+        `from_platform_settings`). See _run_load_plan for details.
 
         Returns a dict of "schema.table" -> rows loaded.
         """
+        if target not in ("legacy", "platform"):
+            raise ValueError(f"target must be 'legacy' or 'platform', got {target!r}")
+
+        tables = _PLATFORM_SENDEM_TABLES if target == "platform" else _LEGACY_SENDEM_TABLES
+
         load_plan = [
-            ("raw", "sendem_assets", dataframes["assets_df"], ["asset_id"]),
-            ("raw", "sendem_sites", dataframes["sites_df"], ["site_id"]),
-            ("raw", "sendem_event_descriptions", dataframes["event_desc_df"], ["event_type_id"]),
+            (*tables["raw_assets"], dataframes["assets_df"], ["asset_id"]),
+            (*tables["raw_sites"], dataframes["sites_df"], ["site_id"]),
+            (*tables["raw_event_descriptions"], dataframes["event_desc_df"], ["event_type_id"]),
             (
-                "raw",
-                "sendem_trips_assets_daily",
+                *tables["raw_trips"],
                 dataframes["trips_df"],
                 ["date_key", "group_id", "site_id", "asset_id"],
             ),
             (
-                "raw",
-                "sendem_events_assets_daily",
+                *tables["raw_events"],
                 dataframes["events_df"],
                 ["date_key", "group_id", "site_id", "asset_id", "event_type_id"],
             ),
-            ("staging", "sendem_dim_assets", dataframes["assets_df"], ["asset_id"]),
-            ("staging", "sendem_dim_sites", dataframes["sites_df"], ["site_id"]),
-            ("staging", "sendem_dim_event_types", dataframes["dim_event_types_df"], ["event_type_id"]),
+            (*tables["staging_dim_assets"], dataframes["assets_df"], ["asset_id"]),
+            (*tables["staging_dim_sites"], dataframes["sites_df"], ["site_id"]),
+            (*tables["staging_dim_event_types"], dataframes["dim_event_types_df"], ["event_type_id"]),
             (
-                "staging",
-                "sendem_fact_trips_daily",
+                *tables["staging_fact_trips"],
                 dataframes["fact_trips"],
                 ["date_key", "group_id", "site_id", "asset_id"],
             ),
             (
-                "staging",
-                "sendem_fact_events_daily",
+                *tables["staging_fact_events"],
                 dataframes["fact_events"],
                 ["date_key", "group_id", "site_id", "asset_id", "event_type_id"],
             ),
