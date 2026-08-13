@@ -47,6 +47,7 @@ from ge_data_platform.config.settings import (
     EvolutionSettings,
     get_etl_ops_settings,
     get_evolution_settings,
+    get_platform_settings,
     get_settings,
     validate_evolution_view_name,
 )
@@ -245,36 +246,87 @@ def to_snake_case(column_name: str) -> str:
     return column_name.lower()
 
 
+def build_raw(datasets: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Combine and snake_case per-company extracts -- the raw_evolution.project_report shape.
+
+    Source-faithful: combines GE + TLS and converts every column name to
+    snake_case, but applies no business_unit classification (see
+    `add_business_unit_classification`). This is the platform raw layer's
+    exact input; `build_combined` composes this with classification for
+    the legacy (and platform staging) shape. See
+    docs/migration/legacy-to-platform-migration.md#evolution-migration-completed
+    for why raw and staging are split this way for Evolution specifically.
+    """
+    combined = combine_data(datasets)
+    combined.columns = [to_snake_case(column) for column in combined.columns]
+    return combined
+
+
+def add_business_unit_classification(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Add `business_unit` to an already-combined, already-snake_case DataFrame.
+
+    Expects `raw_df`'s columns already snake_case (i.e. `build_raw` output)
+    -- reads `company`/`d_date`/`cost_type`, not `DDate`/`CostType`. Appends
+    `business_unit` as a new trailing column, matching `build_combined`'s
+    historical column order (business_unit last).
+    """
+    staged = raw_df.copy()
+    staged["business_unit"] = staged.apply(
+        lambda row: determine_business_unit(row["company"], row["d_date"], row["cost_type"]),
+        axis=1,
+    )
+    return staged
+
+
 def build_combined(datasets: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Combine, classify, and snake_case per-company extracts into one DataFrame.
 
     Mirrors the notebook's run_pipeline(): combine GE + TLS, add
-    `business_unit` (from `BusinessUnit` pre-rename), then convert every
-    column name to snake_case.
+    `business_unit`, then convert every column name to snake_case. The
+    output shape is unchanged from before this function was split into two
+    steps -- composed from `build_raw` (combine + snake_case) and
+    `add_business_unit_classification` (add business_unit) so the platform
+    target can reuse the same two steps for its raw_evolution/stg_evolution
+    split.
     """
-    combined = combine_data(datasets)
-
-    combined["BusinessUnit"] = combined.apply(
-        lambda row: determine_business_unit(row["company"], row["DDate"], row["CostType"]),
-        axis=1,
-    )
-
-    combined.columns = [to_snake_case(column) for column in combined.columns]
-
-    return combined
+    return add_business_unit_classification(build_raw(datasets))
 
 
 # --- Sync ------------------------------------------------------------------
 
 
-def run() -> None:
-    """Execute one Evolution Project Reports sync: extract, transform, load, record."""
-    configure_logging()
-    settings = get_settings()
-    evolution_settings = get_evolution_settings()
-    ops_settings = get_etl_ops_settings()
+def run(*, target: str = "legacy") -> None:
+    """Execute one Evolution Project Reports sync: extract, transform, load, record.
 
-    loader = PostgresLoader(settings)
+    `target="legacy"` (default, unchanged behavior): writes the classified,
+    combined extract straight into `raw.evolution_project_reports` in
+    `telemetry_warehouse`, via `PostgresLoader(settings)` and
+    `replace_accounts_evolution_project_reports`. This is the only target
+    Dagster ever passes.
+
+    `target="platform"`: writes into `ge_warehouse` instead, split into two
+    layers -- `raw_evolution.project_report` (source-faithful, no
+    `business_unit`) and `stg_evolution.project_report` (adds
+    `business_unit`) -- via `PostgresLoader.from_platform_settings` and
+    `replace_evolution_project_reports_platform`. Skips
+    `etl.sync_runs`/`etl.sync_table_loads` bookkeeping (handled by
+    `enable_sync_tracking=False`, same as the other three sources' platform
+    target) and skips post-load validation (hardcoded to legacy schema
+    names). Opt-in, manual-only, not wired to any Dagster schedule. See
+    docs/migration/legacy-to-platform-migration.md#evolution-migration-completed.
+    """
+    configure_logging()
+    if target not in ("legacy", "platform"):
+        raise ValueError(f"target must be 'legacy' or 'platform', got {target!r}")
+
+    evolution_settings = get_evolution_settings()
+
+    if target == "platform":
+        loader = PostgresLoader.from_platform_settings(get_platform_settings())
+        ops_settings = None
+    else:
+        loader = PostgresLoader(get_settings())
+        ops_settings = get_etl_ops_settings()
 
     sync_run_id = loader.start_sync_run(
         source_system=SOURCE_SYSTEM,
@@ -282,7 +334,7 @@ def run() -> None:
         start_date=None,
         end_date=None,
     )
-    logger.info("sync_run_id: %s", sync_run_id)
+    logger.info("sync_run_id: %s (target=%s)", sync_run_id, target)
 
     try:
         logger.info(
@@ -292,21 +344,30 @@ def run() -> None:
         datasets = extract_all(evolution_settings)
         rows_fetched = sum(len(dataset) for dataset in datasets.values())
 
-        combined = build_combined(datasets)
-        logger.info("Combined row count: %s", f"{len(combined):,}")
+        if target == "platform":
+            raw_df = build_raw(datasets)
+            staging_df = add_business_unit_classification(raw_df)
+            logger.info("Extracted batch row count: %s", f"{len(raw_df):,}")
+            load_counts = loader.replace_evolution_project_reports_platform(
+                raw_df, staging_df, sync_run_id=sync_run_id, provider=SOURCE_SYSTEM
+            )
+        else:
+            combined = build_combined(datasets)
+            logger.info("Combined row count: %s", f"{len(combined):,}")
+            load_counts = loader.replace_accounts_evolution_project_reports(
+                combined, sync_run_id=sync_run_id, provider=SOURCE_SYSTEM
+            )
 
-        load_counts = loader.replace_accounts_evolution_project_reports(
-            combined, sync_run_id=sync_run_id, provider=SOURCE_SYSTEM
-        )
         rows_loaded = sum(load_counts.values())
         for table_name, row_count in load_counts.items():
             logger.info("  %s: %s rows loaded (full replace)", table_name, f"{row_count:,}")
 
-        loader.run_post_load_validation(
-            SOURCE_SYSTEM,
-            mode=ops_settings.validation_mode,
-            lookback_hours=ops_settings.validation_lookback_hours,
-        )
+        if target == "legacy":
+            loader.run_post_load_validation(
+                SOURCE_SYSTEM,
+                mode=ops_settings.validation_mode,
+                lookback_hours=ops_settings.validation_lookback_hours,
+            )
 
         loader.finish_sync_run(
             sync_run_id=sync_run_id,
@@ -328,10 +389,17 @@ def run() -> None:
 
 
 def main() -> None:
-    """Parse arguments (none yet -- full extract every run) and run the sync."""
+    """Parse arguments and run the sync."""
     parser = argparse.ArgumentParser(description="Accounts/Evolution Project Reports sync")
-    parser.parse_args()
-    run()
+    parser.add_argument(
+        "--target",
+        choices=["legacy", "platform"],
+        default="legacy",
+        help="legacy (default): telemetry_warehouse raw.evolution_project_reports. "
+        "platform: ge_warehouse raw_evolution/stg_evolution.project_report (opt-in, manual-only).",
+    )
+    args = parser.parse_args()
+    run(target=args.target)
 
 
 if __name__ == "__main__":

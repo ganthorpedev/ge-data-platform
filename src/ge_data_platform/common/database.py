@@ -289,7 +289,29 @@ EVOLUTION_PROJECT_REPORTS_COLUMNS = [
     "business_unit",
 ]
 
+# Same set, minus business_unit (a derived classification) -- the
+# raw_evolution.project_report shape. business_unit is only added for
+# stg_evolution.project_report, which reuses EVOLUTION_PROJECT_REPORTS_COLUMNS
+# above. See sql/migrations/011_create_raw_evolution.sql.
+EVOLUTION_RAW_PROJECT_REPORT_COLUMNS = [c for c in EVOLUTION_PROJECT_REPORTS_COLUMNS if c != "business_unit"]
 
+
+# NOTE on the "(company, id)" key assumption below: live read-only inspection
+# of dbo.vwProjectsReports during the Evolution raw_evolution/stg_evolution
+# migration disproved it -- `id` is a transaction-type/module code (11
+# distinct values total, e.g. "Inv", "JL"), not a per-row identifier, and
+# (company, id) is nowhere near unique (tens of thousands of "duplicates" per
+# database). This is exactly why every real legacy sync attempt against this
+# function has always failed (etl.sync_runs shows 3 FAILED rows for
+# evolution_project_reports, all before this migration). The function below
+# is left unchanged -- its behavior (and the legacy raw.evolution_project_reports
+# schema it targets, from the never-applied telemetry_migrations/029) is
+# out of scope to modify here (telemetry_warehouse stays untouched, and the
+# legacy target/Dagster job is unaffected by this migration). The new
+# platform target uses validate_project_report_batch_for_platform_load
+# below instead, which enforces only the assumptions the source data
+# actually supports. See
+# docs/migration/legacy-to-platform-migration.md#evolution-migration-completed.
 def validate_combined_for_full_replace(
     df: pd.DataFrame,
     *,
@@ -308,6 +330,9 @@ def validate_combined_for_full_replace(
     * `company` or `id` contain any missing values; or
     * `(company, id)` is not unique (the destination's primary key, and the
       column pair the atomic replace joins staging back into raw on).
+
+    Legacy/`target="legacy"` only -- see the module-level note immediately
+    above this function.
     """
     if df.empty:
         raise ValueError(f"Refusing to replace {dataset_name}: the combined extract is unexpectedly empty")
@@ -332,6 +357,40 @@ def validate_combined_for_full_replace(
         raise ValueError(
             f"Refusing to replace {dataset_name}: {int(duplicate_mask.sum())} row(s) "
             "share a duplicate (company, id) key"
+        )
+
+
+def validate_project_report_batch_for_platform_load(
+    df: pd.DataFrame,
+    *,
+    dataset_name: str,
+) -> None:
+    """Refuse to replace a raw_evolution/stg_evolution.project_report batch with unsafe data.
+
+    The platform-target counterpart to `validate_combined_for_full_replace`,
+    with corrected assumptions: dbo.vwProjectsReports has no reliable
+    natural key at the row grain (see the note above
+    `validate_combined_for_full_replace`), so duplicate `(company, id)`
+    pairs -- and even fully duplicate rows -- are expected and are NOT
+    refused here; raw_evolution.project_report/stg_evolution.project_report
+    use a load-time surrogate primary key specifically to allow this (see
+    sql/migrations/011_create_raw_evolution.sql). Raises `ValueError` only
+    if:
+
+    * the batch is unexpectedly empty (a broken extraction must never be
+      allowed to wipe a previously loaded table via the full replace); or
+    * `company` contains any missing/blank values.
+    """
+    if df.empty:
+        raise ValueError(f"Refusing to replace {dataset_name}: the extracted batch is unexpectedly empty")
+
+    if "company" not in df.columns:
+        raise ValueError(f"Refusing to replace {dataset_name}: missing required column 'company'")
+
+    missing_company = df["company"].isna() | (df["company"].astype(str).str.strip() == "")
+    if missing_company.any():
+        raise ValueError(
+            f"Refusing to replace {dataset_name}: {int(missing_company.sum())} row(s) have a missing company"
         )
 
 
@@ -850,69 +909,82 @@ class PostgresLoader:
 
         return self._run_load_plan(load_plan, sync_run_id, provider)
 
-    def replace_accounts_evolution_project_reports(
+    def _full_replace_table(
         self,
-        combined_df: pd.DataFrame,
+        df: pd.DataFrame,
+        *,
+        schema: str,
+        table: str,
+        columns: list[str],
+        staging_schema: str,
         sync_run_id: str | None = None,
-        provider: str = "evolution_project_reports",
-    ) -> dict[str, int]:
-        """Atomically replace raw.evolution_project_reports with combined_df.
+        provider: str | None = None,
+    ) -> int:
+        """Atomically replace schema.table with df. Shared full-replace engine.
 
-        `combined_df` is expected to be the output of
-        ge_data_platform.sources.evolution.project_reports.build_combined
-        (already snake_case, combined, and business-unit classified).
+        Used by both `replace_accounts_evolution_project_reports` (legacy
+        target, `staging_schema="staging"`) and
+        `replace_evolution_project_reports_platform` (platform target,
+        `staging_schema=schema` -- `staging`/`warehouse`/`etl`/`clean` are
+        reserved/forbidden schema names in `ge_warehouse`, see
+        docs/architecture/database-architecture.md, so the platform target's
+        scratch table lives alongside its own destination table instead).
 
-        This is a full-refresh load, not an upsert: dbo.vwProjectsReports is
-        re-extracted in full every run (no evidenced incremental key), so a
-        row removed from the source must also disappear from PostgreSQL --
-        an upsert alone leaves it behind. Steps:
+        `columns` must NOT include a load-time surrogate primary key column
+        (e.g. `project_report_id`) -- omitting it from both the staged
+        `CREATE TABLE ... AS SELECT` and the final `INSERT ... SELECT`
+        column list lets the destination table's own
+        `GENERATED ALWAYS AS IDENTITY` default assign a fresh value per row
+        on insert.
 
-        1. validate_combined_for_full_replace() -- refuse outright if the
-           extract looks unsafe (empty, missing keys, duplicate keys).
-        2. Stage `combined_df` into a freshly created staging table, typed
-           from the destination via `CREATE TABLE ... AS SELECT ... WHERE
-           1 = 0` so money columns keep their NUMERIC(20, 4) precision.
-        3. Verify the staged row count equals `len(combined_df)`.
-        4. Inside one transaction: DELETE every row from the destination,
+        This is a full-refresh load, not an upsert -- callers use it because
+        their source has no evidenced incremental key and is re-extracted in
+        full every run, so a row absent from a later extract must also
+        disappear here. Steps:
+
+        1. Stage `df` into a freshly created staging table, typed from the
+           destination via `CREATE TABLE ... AS SELECT ... WHERE 1 = 0` so
+           money columns keep their NUMERIC(20, 4) precision.
+        2. Verify the staged row count equals `len(df)`.
+        3. Inside one transaction: DELETE every row from the destination,
            INSERT ... SELECT the validated staged rows, then commit.
-        5. Drop the staging table, on both the success and failure paths.
+        4. Drop the staging table, on both the success and failure paths.
 
-        Any failure before step 4's transaction commits -- a failed
-        validation, a staged-count mismatch, or a database error during the
-        swap itself -- leaves the destination table completely untouched;
-        the previous successful load remains the queryable production data.
-        A mid-transaction failure is rolled back by `engine.begin()` before
-        it can be observed by other sessions.
+        Any failure before step 3's transaction commits -- a staged-count
+        mismatch or a database error during the swap itself -- leaves the
+        destination table completely untouched; the previous successful
+        load remains the queryable data. A mid-transaction failure is rolled
+        back by `engine.begin()` before it can be observed by other
+        sessions.
 
-        If `sync_run_id` is given, the load is recorded in
-        etl.sync_table_loads (one row covering the whole replace).
+        Callers are responsible for their own pre-flight validation (e.g.
+        `validate_combined_for_full_replace`/
+        `validate_project_report_batch_for_platform_load`) before calling
+        this. If `sync_run_id` and `provider` are both given, the load is
+        recorded in etl.sync_table_loads (one row covering the whole
+        replace; legacy target only -- `provider` is unused when
+        `enable_sync_tracking` is False).
 
-        Returns {"raw.evolution_project_reports": rows_loaded} on success.
+        Returns the number of rows loaded.
         """
-        validate_combined_for_full_replace(combined_df)
-
-        prepared = prepare_dataframe_for_load(combined_df)
-        missing_columns = [c for c in EVOLUTION_PROJECT_REPORTS_COLUMNS if c not in prepared.columns]
+        prepared = prepare_dataframe_for_load(df)
+        missing_columns = [c for c in columns if c not in prepared.columns]
         if missing_columns:
-            raise ValueError(
-                "Combined extract is missing expected raw.evolution_project_reports "
-                f"column(s): {missing_columns}"
-            )
-        prepared = prepared[EVOLUTION_PROJECT_REPORTS_COLUMNS]
+            raise ValueError(f"Extract is missing expected {schema}.{table} column(s): {missing_columns}")
+        prepared = prepared[columns]
 
-        schema, table = "raw", "evolution_project_reports"
-        staging_table = f"evolution_project_reports_stage_{uuid.uuid4().hex[:8]}"
+        staging_table = f"{table}_stage_{uuid.uuid4().hex[:8]}"
         column_list_sql = ", ".join(prepared.columns)
 
         load_id = None
-        if sync_run_id is not None:
+        if sync_run_id is not None and provider is not None:
             load_id = self.start_table_load(sync_run_id, provider, schema, table, len(prepared))
 
         try:
             with self.engine.begin() as conn:
                 conn.execute(
                     text(
-                        f"CREATE TABLE staging.{staging_table} AS "
+                        f"CREATE TABLE {staging_schema}.{staging_table} AS "
                         f"SELECT {column_list_sql} FROM {schema}.{table} WHERE 1 = 0"
                     )
                 )
@@ -921,7 +993,7 @@ class PostgresLoader:
                 prepared.to_sql(
                     staging_table,
                     con=conn,
-                    schema="staging",
+                    schema=staging_schema,
                     if_exists="append",
                     index=False,
                     method="multi",
@@ -929,7 +1001,9 @@ class PostgresLoader:
                 )
 
             with self.engine.connect() as conn:
-                staged_count = conn.execute(text(f"SELECT COUNT(*) FROM staging.{staging_table}")).scalar_one()
+                staged_count = conn.execute(
+                    text(f"SELECT COUNT(*) FROM {staging_schema}.{staging_table}")
+                ).scalar_one()
 
             if staged_count != len(prepared):
                 raise RuntimeError(
@@ -943,14 +1017,14 @@ class PostgresLoader:
                 conn.execute(
                     text(
                         f"INSERT INTO {schema}.{table} ({column_list_sql}) "
-                        f"SELECT {column_list_sql} FROM staging.{staging_table}"
+                        f"SELECT {column_list_sql} FROM {staging_schema}.{staging_table}"
                     )
                 )
 
             rows_loaded = len(prepared)
             if load_id is not None:
                 self.finish_table_load(load_id, status="SUCCESS", rows_loaded=rows_loaded)
-            return {f"{schema}.{table}": rows_loaded}
+            return rows_loaded
 
         except Exception as error:
             if load_id is not None:
@@ -968,11 +1042,97 @@ class PostgresLoader:
         finally:
             try:
                 with self.engine.begin() as conn:
-                    conn.execute(text(f"DROP TABLE IF EXISTS staging.{staging_table}"))
+                    conn.execute(text(f"DROP TABLE IF EXISTS {staging_schema}.{staging_table}"))
             except Exception as cleanup_error:
                 logger.error(
-                    "Could not drop staging table staging.%s: %s", staging_table, cleanup_error
+                    "Could not drop staging table %s.%s: %s", staging_schema, staging_table, cleanup_error
                 )
+
+    def replace_accounts_evolution_project_reports(
+        self,
+        combined_df: pd.DataFrame,
+        sync_run_id: str | None = None,
+        provider: str = "evolution_project_reports",
+    ) -> dict[str, int]:
+        """Atomically replace raw.evolution_project_reports with combined_df.
+
+        `combined_df` is expected to be the output of
+        ge_data_platform.sources.evolution.project_reports.build_combined
+        (already snake_case, combined, and business-unit classified).
+        `target="legacy"` only -- see `replace_evolution_project_reports_platform`
+        for `target="platform"`. Validated by
+        `validate_combined_for_full_replace` (see the discovery note above
+        it); the actual replace is `_full_replace_table` with
+        `staging_schema="staging"`.
+
+        Returns {"raw.evolution_project_reports": rows_loaded} on success.
+        """
+        validate_combined_for_full_replace(combined_df)
+        rows_loaded = self._full_replace_table(
+            combined_df,
+            schema="raw",
+            table="evolution_project_reports",
+            columns=EVOLUTION_PROJECT_REPORTS_COLUMNS,
+            staging_schema="staging",
+            sync_run_id=sync_run_id,
+            provider=provider,
+        )
+        return {"raw.evolution_project_reports": rows_loaded}
+
+    def replace_evolution_project_reports_platform(
+        self,
+        raw_df: pd.DataFrame,
+        staging_df: pd.DataFrame,
+        sync_run_id: str | None = None,
+        provider: str = "evolution_project_reports",
+    ) -> dict[str, int]:
+        """Atomically replace raw_evolution/stg_evolution.project_report in ge_warehouse.
+
+        `target="platform"` counterpart to
+        `replace_accounts_evolution_project_reports`. `raw_df` is expected to
+        be `ge_data_platform.sources.evolution.project_reports.build_raw`
+        output (combined, snake_case, no business_unit); `staging_df` is
+        expected to be `add_business_unit_classification(raw_df)` (adds
+        business_unit). Both are full-replaced independently via
+        `_full_replace_table`, each with `staging_schema` equal to its own
+        destination schema (ge_warehouse has no shared `staging` schema --
+        that name is reserved for telemetry_warehouse).
+
+        Validated by `validate_project_report_batch_for_platform_load`,
+        which -- unlike `validate_combined_for_full_replace` -- does not
+        assume `(company, id)` uniqueness; see that function's docstring for
+        why. Both destination tables have a load-time surrogate primary key
+        (`project_report_id`) rather than a natural one, for the same
+        reason.
+
+        Returns {"raw_evolution.project_report": ..., "stg_evolution.project_report": ...}
+        on success.
+        """
+        validate_project_report_batch_for_platform_load(raw_df, dataset_name="raw_evolution.project_report")
+        validate_project_report_batch_for_platform_load(staging_df, dataset_name="stg_evolution.project_report")
+
+        raw_rows = self._full_replace_table(
+            raw_df,
+            schema="raw_evolution",
+            table="project_report",
+            columns=EVOLUTION_RAW_PROJECT_REPORT_COLUMNS,
+            staging_schema="raw_evolution",
+            sync_run_id=sync_run_id,
+            provider=provider,
+        )
+        staging_rows = self._full_replace_table(
+            staging_df,
+            schema="stg_evolution",
+            table="project_report",
+            columns=EVOLUTION_PROJECT_REPORTS_COLUMNS,
+            staging_schema="stg_evolution",
+            sync_run_id=sync_run_id,
+            provider=provider,
+        )
+        return {
+            "raw_evolution.project_report": raw_rows,
+            "stg_evolution.project_report": staging_rows,
+        }
 
     def start_sync_run(
         self,
