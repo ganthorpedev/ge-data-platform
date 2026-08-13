@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ge-data-platform"
+version = "0.1.0"
+description = "GE Data Platform: multi-source ETL (Trackunit, Sendem, EzyTrack, Evolution) orchestrated with Dagster."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "requests==2.32.5",
+    "urllib3==2.5.0",
+    "pandas==2.3.1",
+    "tzdata==2025.2",
+    "python-dotenv==1.2.2",
+    "SQLAlchemy==2.0.51",
+    "psycopg2-binary==2.9.12",
+    "dagster==1.13.14",
+    "dagster-webserver==1.13.14",
+    # SQL Server ODBC driver for Accounts/Evolution extraction (requires the
+    # "ODBC Driver 17 for SQL Server" system driver to be installed separately).
+    "pyodbc==5.2.0",
+]
+
+[project.optional-dependencies]
+# Provider tests mock HTTP/SQL and never call live APIs or databases.
+test = [
+    "pytest==9.1.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
