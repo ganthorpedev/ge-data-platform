@@ -92,6 +92,12 @@ def _env_bool(name: str, default: bool) -> bool:
 
 DEFAULT_INSIGHTS_API_URL = "https://insights.za.mixtelematics.com"
 DEFAULT_POSTGRES_PORT = 5432
+# The new GE Data Platform warehouse database name. Deliberately a separate
+# setting from POSTGRES_DB (which stays pointed at the legacy
+# telemetry_warehouse database used by Settings/PostgresLoader today) so
+# neither database name is hardcoded anywhere in new platform code -- see
+# docs/ge_warehouse_architecture.md.
+DEFAULT_GE_WAREHOUSE_DB = "ge_warehouse"
 DEFAULT_SYNC_LOOKBACK_DAYS = 7
 DEFAULT_TELEMATICS_LOOKBACK_DAYS = 7
 DEFAULT_TELEMATICS_PAGE_SIZE = 50
@@ -235,6 +241,51 @@ def get_settings() -> Settings:
         postgres_user=os.environ["POSTGRES_USER"],
         postgres_password=os.environ["POSTGRES_PASSWORD"],
         sync_lookback_days=int(os.getenv("SYNC_LOOKBACK_DAYS", DEFAULT_SYNC_LOOKBACK_DAYS)),
+        postgres_pool_timeout_seconds=_env_int("POSTGRES_POOL_TIMEOUT_SECONDS", 30),
+    )
+
+
+@dataclass(frozen=True)
+class PlatformSettings:
+    """Connection settings for the new ge_warehouse platform database.
+
+    Shares its host/port/user/password with the legacy `Settings`
+    (POSTGRES_HOST/PORT/USER/PASSWORD -- one Postgres server instance, same
+    credentials) but never the database name: `ge_warehouse_db` is read from
+    its own GE_WAREHOUSE_DB environment variable (default "ge_warehouse"), so
+    the legacy telemetry_warehouse name is never hardcoded in, or silently
+    reused by, new platform code.
+    """
+
+    postgres_host: str
+    postgres_port: int
+    ge_warehouse_db: str
+    postgres_user: str
+    postgres_password: str
+    postgres_pool_timeout_seconds: int = 30
+
+
+def get_platform_settings() -> PlatformSettings:
+    """Load, validate, and return ge_warehouse connection settings.
+
+    Reuses the same required POSTGRES_HOST/USER/PASSWORD variables as
+    `get_settings()` (one Postgres server, shared credentials) plus the
+    optional GE_WAREHOUSE_DB (default "ge_warehouse"). Raises `ValueError` if
+    a required shared credential is missing.
+    """
+    load_project_env()
+
+    required = ("POSTGRES_HOST", "POSTGRES_USER", "POSTGRES_PASSWORD")
+    missing = [name for name in required if not os.getenv(name)]
+    if missing:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+    return PlatformSettings(
+        postgres_host=os.environ["POSTGRES_HOST"],
+        postgres_port=int(os.getenv("POSTGRES_PORT", DEFAULT_POSTGRES_PORT)),
+        ge_warehouse_db=os.getenv("GE_WAREHOUSE_DB", DEFAULT_GE_WAREHOUSE_DB),
+        postgres_user=os.environ["POSTGRES_USER"],
+        postgres_password=os.environ["POSTGRES_PASSWORD"],
         postgres_pool_timeout_seconds=_env_int("POSTGRES_POOL_TIMEOUT_SECONDS", 30),
     )
 

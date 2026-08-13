@@ -284,7 +284,14 @@ def finish_sync_run_failed_safe(loader: "PostgresLoader", sync_run_id: str, erro
 
 
 class PostgresLoader:
-    """Loads Sendem dataframes into the telemetry_warehouse PostgreSQL database."""
+    """Loads provider dataframes into the legacy telemetry_warehouse PostgreSQL database.
+
+    Unchanged by the introduction of the ge_warehouse platform database (see
+    ge_data_platform.config.settings.get_platform_settings /
+    docs/ge_warehouse_architecture.md) -- this class still targets whatever
+    `Settings.postgres_db` resolves to (telemetry_warehouse today), and no
+    ingestion pipeline has been ported to write to ge_warehouse yet.
+    """
 
     def __init__(self, settings: Settings) -> None:
         """Create and store a SQLAlchemy engine from `settings`.
