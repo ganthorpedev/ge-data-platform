@@ -4,7 +4,7 @@ This module is the only place that should know how to open a connection to
 an Evolution SQL Server database. GE and TLS are two databases on the same
 server, reached with the same driver and credentials -- callers pass only
 the target database name, so there is exactly one connection code path for
-both companies (config.settings.EvolutionSettings.sources).
+both companies (ge_data_platform.config.settings.EvolutionSettings.sources).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from contextlib import contextmanager
 
 import pyodbc
 
-from config.settings import EvolutionSettings
+from ge_data_platform.config.settings import EvolutionSettings
 
 logger = logging.getLogger(__name__)
 
