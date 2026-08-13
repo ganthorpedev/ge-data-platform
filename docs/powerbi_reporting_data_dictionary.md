@@ -5,10 +5,11 @@ Power BI schema: **`reporting`**
 
 > This dictionary describes the current, live reporting layer, which still
 > lives in `telemetry_warehouse.reporting`. A new platform database,
-> `ge_warehouse`, is under construction (see `docs/ge_warehouse_architecture.md`)
-> but is not reporting-facing yet -- Power BI must keep pointing at
-> `telemetry_warehouse.reporting` until a future phase explicitly cuts it
-> over to `ge_warehouse`'s `mart_*` schemas.
+> `ge_warehouse`, is under construction (see
+> `docs/architecture/platform-overview.md` and
+> `docs/warehouse/reporting-layer.md`) but is not reporting-facing yet --
+> Power BI must keep pointing at `telemetry_warehouse.reporting` until a
+> future phase explicitly cuts it over to `ge_warehouse`'s `mart_*` schemas.
 
 ## The one rule
 

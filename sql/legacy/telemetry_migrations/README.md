@@ -8,7 +8,7 @@ moved here verbatim from `sql/migrations/` with git history preserved.
 against the live `telemetry_warehouse` database and remain the historical
 record of that database's migration sequence. `sql/migrations/` now holds a
 separate, independent numbering sequence for the new `ge_warehouse` platform
-database — see `docs/ge_warehouse_architecture.md`. The two sequences are
+database — see `docs/development/migrations.md`. The two sequences are
 unrelated: a `sql/migrations/001_*.sql` file here is not "the same 001" as
 `sql/legacy/telemetry_migrations/001_create_sendem_schema.sql`.
 
