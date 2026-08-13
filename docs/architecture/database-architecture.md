@@ -12,12 +12,12 @@ checks against it). For what each layer *means*, see
 
 | Schema | Layer | Status | Contents today |
 |---|---|---|---|
-| `raw_trackunit` | raw | IMPLEMENTED | empty |
+| `raw_trackunit` | raw | IMPLEMENTED | 7 tables, populated -- full historical backfill from `telemetry_warehouse` plus live API data (see `docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed`) |
 | `raw_sendem` | raw | IMPLEMENTED | empty |
 | `raw_ezytrack` | raw | IMPLEMENTED | empty |
 | `raw_evolution` | raw | IMPLEMENTED | empty |
 | `raw_fieldops` | raw | IMPLEMENTED | empty |
-| `stg_trackunit` | staging | IMPLEMENTED | empty |
+| `stg_trackunit` | staging | IMPLEMENTED | 3 tables, populated -- see `docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed` |
 | `stg_sendem` | staging | IMPLEMENTED | empty |
 | `stg_ezytrack` | staging | IMPLEMENTED | empty |
 | `stg_evolution` | staging | IMPLEMENTED | empty |
@@ -37,6 +37,30 @@ plus `ops.schema_version`), `002_create_ops_metadata.sql` (the remaining
 `004_create_core_dim_date.sql` (`core.dim_date`). Applied to the local
 development database via `python -m scripts.setup_ge_warehouse --all`; see
 `docs/development/migrations.md`.
+
+### `raw_trackunit` / `stg_trackunit` tables
+
+The only source fully migrated so far -- see
+`docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed`
+for the full backfill/validation procedure and results.
+
+| Table | Row count (dev, after historical backfill) |
+|---|---|
+| `raw_trackunit.asset` | 107 |
+| `raw_trackunit.aemp_operating_hour` | ~125,000 |
+| `raw_trackunit.aemp_moving_hour` | ~123,000 |
+| `raw_trackunit.aemp_distance` | ~123,000 |
+| `raw_trackunit.aemp_location` | 28,501 |
+| `raw_trackunit.site_history` | 39 |
+| `raw_trackunit.site` | 11 |
+| `stg_trackunit.asset` | 107 |
+| `stg_trackunit.daily_activity` | ~860 (grows with every fresh sync) |
+| `stg_trackunit.location_enrichment` | 105 |
+
+`stg_trackunit.daily_activity` includes `counter_reset_detected`/
+`data_quality_status` as real, populated columns from the start -- unlike
+legacy `staging.trackunit_daily_activity`, which never actually got these
+columns (see `docs/operations/data-quality.md`).
 
 ### `ops` tables
 

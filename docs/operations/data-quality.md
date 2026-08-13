@@ -1,20 +1,44 @@
 # Data quality
 
 **Status: mixed** -- see each section. All IMPLEMENTED behavior below runs
-against `telemetry_warehouse`.
+against `telemetry_warehouse` unless noted otherwise; Trackunit counter-reset
+handling also runs against `ge_warehouse` (`raw_trackunit`/`stg_trackunit`,
+opt-in via `--target platform` -- see `docs/sources/trackunit.md`).
 
 ## Counter reset handling
 
-**Status: IMPLEMENTED**, both as an ongoing per-load check and as a
-one-time historical repair. Full detail in
-`docs/sources/trackunit.md#counter-reset-handling`; summary: a mid-series
-decrease in a Trackunit cumulative counter nulls only that metric's derived
-value for that asset/day and sets `data_quality_status='COUNTER_RESET'` /
-`counter_reset_detected=true` on the row, without touching raw readings or
-other metrics on the same row. This is the platform's only working example
-of provider-specific data-quality logic, and the model for how any future
-source's quality rules should be scoped (per-metric, non-destructive to
-raw, explicit on the row rather than silently dropped).
+**Status: IMPLEMENTED as an ongoing per-load check (both `telemetry_warehouse`
+and `ge_warehouse`). The one-time historical repair migration exists but was
+never actually applied to this local `telemetry_warehouse`.**
+
+Full detail in `docs/sources/trackunit.md#counter-reset-handling`; summary: a
+mid-series decrease in a Trackunit cumulative counter nulls only that
+metric's derived value for that asset/day and sets
+`data_quality_status='COUNTER_RESET'` / `counter_reset_detected=true` on the
+row, without touching raw readings or other metrics on the same row. This is
+the platform's only working example of provider-specific data-quality logic,
+and the model for how any future source's quality rules should be scoped
+(per-metric, non-destructive to raw, explicit on the row rather than
+silently dropped).
+
+**Discovered during the Trackunit `raw_trackunit`/`stg_trackunit` migration**
+(see `docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed`):
+`sql/legacy/telemetry_migrations/027_add_trackunit_counter_quality.sql` --
+which adds `counter_reset_detected`/`data_quality_status` and backfills them
+for historical rows -- was written but never actually run against this local
+`telemetry_warehouse`. Live catalog inspection confirmed
+`staging.trackunit_daily_activity` has neither column, and 238 (asset,
+report_date) pairs in the raw AEMP series show a genuine mid-day counter
+decrease that legacy staging never nulled (its derived metric still holds
+the pre-fix value). The ongoing per-load check in `transform.py` is and was
+correct; only the one-time historical repair was skipped. `telemetry_warehouse`
+is read-only for platform-migration work, so this was not fixed there.
+Instead, `scripts/backfill_trackunit_historical.py` applies 027's exact
+detection logic while writing into `ge_warehouse`, so `stg_trackunit.daily_activity`
+starts from the corrected state 027 always intended -- 230 rows there are
+`COUNTER_RESET`, a documented, verified divergence from the (still-uncorrected)
+legacy value for those same rows. `scripts/validate_trackunit_migration.py`
+checks this independently rather than trusting the backfill's own output.
 
 ## Validation SQL philosophy
 

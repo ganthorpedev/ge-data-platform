@@ -1,7 +1,12 @@
 # Trackunit / Manitou
 
-**Status: IMPLEMENTED and running against `telemetry_warehouse` (LEGACY
-target database). Not yet ported to `raw_trackunit`/`stg_trackunit`.**
+**Status: IMPLEMENTED. Production Dagster schedules still write only to
+`telemetry_warehouse` (LEGACY target, default). `raw_trackunit`/
+`stg_trackunit` also exist in `ge_warehouse` now, historically backfilled
+and validated, and the same code can write there via `--target platform` --
+opt-in, not the default, not wired to any schedule. See
+`docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed`
+for the full migration record.**
 
 Source system for fleet telemetry: asset master data, cumulative
 operating/moving-hour and distance counters (via AEMP), and location
@@ -173,3 +178,27 @@ because they write the same staging table. See
 See `docs/operations/pipeline-operations.md#dagster-jobs-and-schedules` for
 the full cron table (`trackunit_daily_refresh`, `trackunit_intraday_refresh`,
 `trackunit_rolling_7_days`).
+
+## `ge_warehouse` platform target
+
+**Status: IMPLEMENTED, opt-in, not scheduled.**
+
+`daily_activity.py` and `location.py` both accept `--target {legacy,platform}`
+(default `legacy` -- current behavior, unchanged). `--target platform`:
+
+- writes to `raw_trackunit.*`/`stg_trackunit.*` in `ge_warehouse` instead of
+  `raw.*`/`staging.*` in `telemetry_warehouse` (same transform/client code,
+  same reliability behavior -- only the destination schema/table names and
+  database differ, via `PostgresLoader.from_platform_settings` and the
+  `target=` parameter on `load_trackunit_tables`/
+  `load_trackunit_location_enrichment` in `common/database.py`);
+- skips `etl.sync_runs`/`etl.sync_table_loads` bookkeeping (`ops.pipeline_run`/
+  `ops.table_load` are not yet wired -- see
+  `docs/operations/pipeline-operations.md`);
+- skips post-load validation (its checks are hardcoded to legacy schema
+  names).
+
+No Dagster job or schedule passes `--target platform`; it is exercised only
+by manual invocation today. See
+`docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed`
+for the historical backfill and a real fresh-ingestion test run against it.
