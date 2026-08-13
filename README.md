@@ -88,7 +88,7 @@ applied (idempotent, safe to rerun) and the `EVOLUTION_*` variables in `.env`
 filled in -- see `.env.example`.
 
 ```powershell
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\029_create_accounts_evolution_project_reports_schema.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\029_create_accounts_evolution_project_reports_schema.sql
 ```
 
 See the [operations runbook](docs/reliability_operations.md) before a backfill.

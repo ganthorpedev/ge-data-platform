@@ -421,8 +421,8 @@ apply the reliability migrations in numeric order before starting the hardened
 jobs:
 
 ```powershell
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\027_add_trackunit_counter_quality.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\028_add_sync_run_abandoned_support.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\027_add_trackunit_counter_quality.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\028_add_sync_run_abandoned_support.sql
 ```
 
 Migration 027 adds Trackunit counter-quality columns, repairs historical
@@ -444,17 +444,17 @@ legacy `clean.sendem_*` tables. An empty database needs this object-creation
 order before the validation packs:
 
 ```powershell
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\001_create_sendem_schema.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\001_create_sendem_schema.sql
 psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -c 'CREATE SCHEMA IF NOT EXISTS clean;'
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\sendem_tables.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\002_create_sendem_warehouse_views.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\004_create_etl_sync_table_loads.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\010_create_ezytrack_schema.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\020_create_trackunit_schema.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\025_create_trackunit_location_enrichment.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\022_create_reporting_powerbi_views.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\027_add_trackunit_counter_quality.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\028_add_sync_run_abandoned_support.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\sendem_tables.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\002_create_sendem_warehouse_views.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\004_create_etl_sync_table_loads.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\010_create_ezytrack_schema.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\020_create_trackunit_schema.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\025_create_trackunit_location_enrichment.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\022_create_reporting_powerbi_views.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\027_add_trackunit_counter_quality.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\legacy\telemetry_migrations\028_add_sync_run_abandoned_support.sql
 ```
 
 Apply the separately controlled Power BI reader-role script only after replacing
