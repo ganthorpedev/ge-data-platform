@@ -6,10 +6,13 @@ Run with:
 Daily reconciliation mode (a longer, fixed lookback):
     python -m ge_data_platform.sources.ezytrack.sync --reconcile
 
+Platform target (ge_warehouse, opt-in, manual only -- see below):
+    python -m ge_data_platform.sources.ezytrack.sync --target platform --lookback-hours 1
+
 This orchestrates: fetch (ge_data_platform.sources.ezytrack.client) ->
 transform (ge_data_platform.sources.ezytrack.transform) -> load
 (ge_data_platform.common.database), and records the run in etl.sync_runs /
-etl.sync_table_loads.
+etl.sync_table_loads (legacy target only -- see below).
 
 RELIABLE CATCH-UP MODE:
 The first run uses the existing default lookback (6 hours by default).
@@ -23,6 +26,20 @@ the whole run is marked FAILED with that chunk's window in error_message,
 and the exception is re-raised. There is no partial SUCCESS -- either every
 chunk fetches cleanly and the transformed/deduplicated result is loaded, or
 nothing is loaded and the run is marked FAILED.
+
+PLATFORM TARGET AND CATCH-UP SAFETY:
+`--target platform` writes to raw_ezytrack.*/stg_ezytrack.* in ge_warehouse
+via PostgresLoader.from_platform_settings(). That database has no `etl`
+schema at all, so the catch-up cursor lookup (`get_last_successful_run`,
+which reads legacy `etl.sync_runs`) is never used for a platform-target run
+-- `PostgresLoader.get_last_successful_run` returns None immediately when
+`enable_sync_tracking` is False (always the case for a platform-settings
+loader), so a platform-target run always computes its window as a
+first-run/explicit-window fetch, exactly like `--reconcile` already does by
+construction, never a multi-day catch-up inferred from a stale legacy
+cursor. `--lookback-hours` (below) additionally lets an operator supply an
+explicit small window for a manual platform-target test, overriding
+`EzytrackSettings.lookback_hours` for that one run only.
 
 AUTHENTICATION:
 This job authenticates once, explicitly, right after starting the sync_run
@@ -51,6 +68,7 @@ from ge_data_platform.config.settings import (
     EzytrackSettings,
     get_etl_ops_settings,
     get_ezytrack_settings,
+    get_platform_settings,
     get_settings,
 )
 from ge_data_platform.sources.ezytrack.client import EzytrackClient
@@ -212,22 +230,62 @@ def _fetch_trips_for_chunk(
         ) from error
 
 
-def run(*, reconcile: bool = False, now_utc: datetime | None = None) -> None:
+def run(
+    *,
+    reconcile: bool = False,
+    now_utc: datetime | None = None,
+    target: str = "legacy",
+    lookback_hours: int | None = None,
+) -> None:
     """Execute one EzyTrack sync run: fetch, transform, load, and record the result.
 
     Marks etl.sync_runs SUCCESS only if every chunk in the lookback window
     was fetched successfully. Any failure marks the run FAILED with the
     failing chunk's window in error_message and re-raises.
+
+    `target` selects the destination: "legacy" (default, unchanged
+    behavior) writes raw.ezytrack_*/staging.ezytrack_* in
+    telemetry_warehouse, with full etl.sync_runs/etl.sync_table_loads
+    bookkeeping, catch-up-cursor lookup, and post-load validation.
+    "platform" writes raw_ezytrack.*/stg_ezytrack.* in ge_warehouse via
+    PostgresLoader.from_platform_settings() -- same fetch/transform/retry/
+    pagination/dedup behavior, but sync tracking, the catch-up-cursor
+    lookup, and post-load validation are all skipped (ops.pipeline_run/
+    ops.table_load are not yet wired, `etl.sync_runs` does not exist in
+    ge_warehouse, and the post-load checks are hardcoded to legacy schema
+    names), matching the Trackunit/Sendem platform-target precedent -- see
+    docs/sources/ezytrack.md#ge_warehouse-platform-target.
+
+    `lookback_hours`, if given, overrides `EzytrackSettings.lookback_hours`
+    for this run only -- lets an operator supply an explicit small window
+    (e.g. 1 hour) for a manual platform-target test without touching the
+    configured default.
     """
     configure_logging()
+    if target not in ("legacy", "platform"):
+        raise ValueError(f"target must be 'legacy' or 'platform', got {target!r}")
+
     print("Loading settings...")
     postgres_settings = get_settings()
     ezytrack_settings = get_ezytrack_settings()
     ops_settings = get_etl_ops_settings()
+    effective_lookback_hours = (
+        ezytrack_settings.lookback_hours if lookback_hours is None else lookback_hours
+    )
+    if effective_lookback_hours < 1:
+        raise ValueError(f"lookback_hours must be at least 1, got {effective_lookback_hours}")
 
-    loader = PostgresLoader(postgres_settings)
+    if target == "platform":
+        loader = PostgresLoader.from_platform_settings(get_platform_settings())
+    else:
+        loader = PostgresLoader(postgres_settings)
     client = EzytrackClient(ezytrack_settings)
 
+    # get_last_successful_run() returns None unconditionally when the loader
+    # has sync tracking disabled (always true for a platform-target loader
+    # -- see PostgresLoader.get_last_successful_run), so a platform-target
+    # run always falls through to first-run/explicit-window behavior below,
+    # never a catch-up window computed from telemetry_warehouse's cursor.
     last_success = None if reconcile else loader.get_last_successful_run(SOURCE_SYSTEM)
     success_cursor = _last_success_window_end(last_success)
     # Choose the window end after the lookup so it remains as close as
@@ -235,7 +293,7 @@ def run(*, reconcile: bool = False, now_utc: datetime | None = None) -> None:
     end_time = _as_utc(now_utc) if now_utc is not None else utc_now()
     start_time, end_time = calculate_sync_window(
         end_time=end_time,
-        default_lookback_hours=ezytrack_settings.lookback_hours,
+        default_lookback_hours=effective_lookback_hours,
         max_catchup_hours=ezytrack_settings.max_catchup_hours,
         overlap_minutes=ezytrack_settings.catchup_overlap_minutes,
         last_success_window_end=success_cursor,
@@ -245,6 +303,7 @@ def run(*, reconcile: bool = False, now_utc: datetime | None = None) -> None:
     )
     chunk_windows = _build_chunk_windows(start_time, end_time, ezytrack_settings.chunk_hours)
     window_mode = "reconciliation" if reconcile else ("catch-up" if success_cursor else "first-run")
+    print(f"Target: {target}")
     print(
         f"Sync window ({window_mode}, UTC): {format_utc_iso(start_time)} to "
         f"{format_utc_iso(end_time)} "
@@ -286,15 +345,19 @@ def run(*, reconcile: bool = False, now_utc: datetime | None = None) -> None:
             dataframes,
             sync_run_id=sync_run_id,
             provider=SOURCE_SYSTEM,
+            target=target,
         )
         for table_name, row_count in load_counts.items():
             print(f"  {table_name}: {row_count} rows")
 
-        loader.run_post_load_validation(
-            SOURCE_SYSTEM,
-            mode=ops_settings.validation_mode,
-            lookback_hours=ops_settings.validation_lookback_hours,
-        )
+        if target == "legacy":
+            loader.run_post_load_validation(
+                SOURCE_SYSTEM,
+                mode=ops_settings.validation_mode,
+                lookback_hours=ops_settings.validation_lookback_hours,
+            )
+        else:
+            print("Skipping post-load validation for platform target (checks are hardcoded to legacy schema names)")
 
         rows_fetched = len(assets) + len(deduped_trips)
         rows_loaded = sum(load_counts.values())
@@ -322,8 +385,20 @@ def main() -> None:
         action="store_true",
         help="Use EZYTRACK_RECONCILIATION_LOOKBACK_HOURS instead of the success cursor",
     )
+    parser.add_argument(
+        "--target",
+        choices=["legacy", "platform"],
+        default="legacy",
+        help="legacy (default): telemetry_warehouse raw/staging. platform: ge_warehouse raw_ezytrack/stg_ezytrack.",
+    )
+    parser.add_argument(
+        "--lookback-hours",
+        type=int,
+        default=None,
+        help="Override TELEMATICS_LOOKBACK_HOURS for one run (e.g. a small bounded --target platform test)",
+    )
     args = parser.parse_args()
-    run(reconcile=args.reconcile)
+    run(reconcile=args.reconcile, target=args.target, lookback_hours=args.lookback_hours)
 
 
 if __name__ == "__main__":

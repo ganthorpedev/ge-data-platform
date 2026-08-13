@@ -75,6 +75,19 @@ _PLATFORM_SENDEM_TABLES = {
     "staging_fact_events": ("stg_sendem", "event_daily"),
 }
 
+_LEGACY_EZYTRACK_TABLES = {
+    "raw_assets": ("raw", "ezytrack_assets"),
+    "raw_trips": ("raw", "ezytrack_trips"),
+    "staging_dim_assets": ("staging", "ezytrack_dim_assets"),
+    "staging_fact_trips": ("staging", "ezytrack_fact_trips"),
+}
+_PLATFORM_EZYTRACK_TABLES = {
+    "raw_assets": ("raw_ezytrack", "asset"),
+    "raw_trips": ("raw_ezytrack", "trip"),
+    "staging_dim_assets": ("stg_ezytrack", "asset"),
+    "staging_fact_trips": ("stg_ezytrack", "trip"),
+}
+
 _LEGACY_TRACKUNIT_LOCATION_TABLES = {
     "raw_locations": ("raw", "trackunit_aemp_locations"),
     "raw_site_history": ("raw", "trackunit_site_history"),
@@ -697,6 +710,7 @@ class PostgresLoader:
         dataframes: dict[str, pd.DataFrame],
         sync_run_id: str | None = None,
         provider: str = "ezytrack",
+        target: str = "legacy",
     ) -> dict[str, int]:
         """Load all EzyTrack raw and staging tables from the given dataframes.
 
@@ -705,8 +719,17 @@ class PostgresLoader:
         transforms.ezytrack_transform.build_all()). Raises `ValueError` if
         any of these keys are missing -- it does not guess or substitute.
 
+        `target` selects which schema/table names to write to: "legacy"
+        (default, unchanged behavior) writes raw.ezytrack_*/staging.ezytrack_*
+        in telemetry_warehouse; "platform" writes raw_ezytrack.*/stg_ezytrack.*
+        in ge_warehouse (see sql/migrations/009_create_raw_ezytrack.sql and
+        010_create_stg_ezytrack.sql). Column shapes are identical either way
+        -- only the destination schema/table names and database differ, same
+        pattern as load_trackunit_tables/load_sendem_tables.
+
         If `sync_run_id` is given, each table load is separately recorded in
-        etl.sync_table_loads. See _run_load_plan for details.
+        etl.sync_table_loads (legacy target only -- see
+        `from_platform_settings`). See _run_load_plan for details.
 
         Returns a dict of "schema.table" -> rows loaded.
         """
@@ -714,12 +737,16 @@ class PostgresLoader:
         missing_keys = [key for key in required_keys if key not in dataframes]
         if missing_keys:
             raise ValueError(f"Missing required EzyTrack dataframe keys: {missing_keys}")
+        if target not in ("legacy", "platform"):
+            raise ValueError(f"target must be 'legacy' or 'platform', got {target!r}")
+
+        tables = _PLATFORM_EZYTRACK_TABLES if target == "platform" else _LEGACY_EZYTRACK_TABLES
 
         load_plan = [
-            ("raw", "ezytrack_assets", dataframes["raw_assets_df"], ["asset_id"]),
-            ("raw", "ezytrack_trips", dataframes["raw_trips_df"], ["trip_id"]),
-            ("staging", "ezytrack_dim_assets", dataframes["dim_assets_df"], ["asset_id"]),
-            ("staging", "ezytrack_fact_trips", dataframes["fact_trips_df"], ["trip_id"]),
+            (*tables["raw_assets"], dataframes["raw_assets_df"], ["asset_id"]),
+            (*tables["raw_trips"], dataframes["raw_trips_df"], ["trip_id"]),
+            (*tables["staging_dim_assets"], dataframes["dim_assets_df"], ["asset_id"]),
+            (*tables["staging_fact_trips"], dataframes["fact_trips_df"], ["trip_id"]),
         ]
 
         return self._run_load_plan(load_plan, sync_run_id, provider)
@@ -1106,7 +1133,21 @@ class PostgresLoader:
         `started_at` is the reliable proxy for that run's fetch-window end
         (jobs anchor their window at "now" immediately before starting the
         run row), which is what EzyTrack gap recovery needs.
+
+        Returns None immediately if `enable_sync_tracking` is False -- see
+        `from_platform_settings`. This is required, not just consistent with
+        the other bookkeeping methods: `etl.sync_runs` does not exist at all
+        in ge_warehouse, so an unguarded query here would either raise
+        (UndefinedTable) or, worse, succeed against the wrong database and
+        let a platform-target run misread telemetry_warehouse's (possibly
+        very stale) success cursor and attempt a large, unintended catch-up.
+        A platform-target EzyTrack run therefore always computes its window
+        as if no prior successful run exists (first-run/explicit-window
+        behavior) -- see docs/sources/ezytrack.md#ge_warehouse-platform-target.
         """
+        if not self.enable_sync_tracking:
+            return None
+
         statement = text("""
             SELECT sync_run_id, job_name, started_at, finished_at
             FROM etl.sync_runs
