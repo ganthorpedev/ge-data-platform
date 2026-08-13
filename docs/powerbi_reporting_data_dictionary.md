@@ -13,12 +13,12 @@ ETL target — none of it is meant to be interpreted without the cleanup and
 blending logic that lives in the `reporting` views. `warehouse` is currently
 unused and out of scope for this step.
 
-The `powerbi_reader` role (see `sql/024_create_powerbi_reader_role.sql`, not
+The `powerbi_reader` role (see `sql/migrations/024_create_powerbi_reader_role.sql`, not
 yet run) is deliberately granted `USAGE`/`SELECT` on `reporting` only, with no
 grants anywhere else, so this rule is enforced at the database level once
 that file is applied.
 
-Every view below is created/replaced by `sql/022_create_reporting_powerbi_views.sql`,
+Every view below is created/replaced by `sql/migrations/022_create_reporting_powerbi_views.sql`,
 which only ever creates the `reporting` schema and `CREATE OR REPLACE VIEW`
 statements — it never inserts, updates, deletes, truncates, or alters a
 table. It is safe to re-run at any time.
@@ -52,7 +52,7 @@ Per explicit decision, the Sendem reporting views (`vw_sendem_trips_daily`,
 1. **`staging` wins on any grain collision.** If the same
    `(date_key, group_id, site_id, asset_id[, event_type_id])` exists in both
    `clean` and `staging`, the `staging` row is kept and the `clean` row is
-   discarded. Verified empirically: `sql/023_validate_reporting_powerbi_views.sql`
+   discarded. Verified empirically: `sql/validation/validate_reporting_powerbi_views.sql`
    section 5 checks every known collision key and confirms zero rows resolve
    to `clean`.
 2. **Dimensions prefer `staging`, fall back to `clean`.** Internal helper
@@ -161,7 +161,7 @@ and is de-duplicated before loading.
 2026-07-05 as a controlled test. Every other `staging.trackunit_daily_activity`
 row shows `location_enrichment_status = NOT_YET_ENRICHED` until the job is
 run for those report_dates/machines too — this is expected, not a defect
-(see `sql/026_validate_trackunit_location_enrichment.sql` check 3 for the
+(see `sql/validation/validate_trackunit_location_enrichment.sql` check 3 for the
 current backlog).
 
 ### `reporting.vw_sendem_trips_daily`
@@ -435,7 +435,7 @@ ORDER BY activity_date DESC;
    not a configured setting — see Timezone Handling above.
 7. **`vw_provider_sync_health` thresholds (6h/48h)** are defaults, not
    tuned against confirmed production scheduling cadence.
-8. **`powerbi_reader` role is not yet created** — `sql/024_create_powerbi_reader_role.sql`
+8. **`powerbi_reader` role is not yet created** — `sql/migrations/024_create_powerbi_reader_role.sql`
    exists for review but has deliberately not been run.
 9. **`vw_ezytrack_trip_report` has no fuel data.** `"Estimated Fuel Consumption (l)"`
    is always `NULL` — no fuel field exists anywhere in raw/staging EzyTrack

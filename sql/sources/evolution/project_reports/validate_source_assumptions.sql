@@ -3,11 +3,11 @@
 -- Not a migration: run manually against EACH Evolution database (connect
 -- to the GE database, run it; connect to the TLS database, run it again)
 -- to confirm or refute the assumptions documented in
--- sql/029_create_accounts_evolution_project_reports_schema.sql before
+-- sql/migrations/029_create_accounts_evolution_project_reports_schema.sql before
 -- trusting them in production. Read-only; makes no changes.
 
 -- 1) Actual data type of Id (and its declared precision/scale, if numeric).
---    Confirms/refutes the BIGINT assumption in sql/029_create_accounts_
+--    Confirms/refutes the BIGINT assumption in sql/migrations/029_create_accounts_
 --    evolution_project_reports_schema.sql.
 SELECT
     COLUMN_NAME,
@@ -45,7 +45,7 @@ HAVING COUNT(*) > 1
 ORDER BY occurrences DESC;
 
 -- 4) Whether DDate carries a time component. Confirms/refutes the DATE
---    (not TIMESTAMP) assumption in sql/029_create_accounts_evolution_
+--    (not TIMESTAMP) assumption in sql/migrations/029_create_accounts_evolution_
 --    project_reports_schema.sql. DATA_TYPE alone is often decisive (e.g.
 --    "date" vs "datetime"/"datetime2"); the second query is a value-level
 --    cross-check and is safe to run even if DDate is already a plain date.
@@ -82,7 +82,7 @@ WHERE ABS(Credit) >= 1e16
    OR ABS(TaxAmount) >= 1e16;
 
 -- 5c) Scale check: rows where the source value carries more than 4 decimal
---     places, which sql/accounts/evolution/project_reports/extract_project_
+--     places, which sql/sources/evolution/project_reports/extract_project_
 --     reports.sql's CAST(... AS DECIMAL(20, 4)) would silently round.
 SELECT COUNT(*) AS rows_with_excess_scale
 FROM dbo.vwProjectsReports

@@ -12,15 +12,15 @@ from typing import Any
 import dagster as dg
 import pytest
 
-from orchestration import alerts, definitions, monitoring, runner
-from orchestration import schedules as schedules_module
-from orchestration.overlap import (
+from ge_data_platform.common import overlap as overlap_lock
+from ge_data_platform.orchestration import alerts, definitions, monitoring, runner
+from ge_data_platform.orchestration import schedules as schedules_module
+from ge_data_platform.orchestration.overlap import (
     ACTIVE_RUN_STATUSES,
     EZYTRACK_DAGSTER_JOB_NAMES,
     TRACKUNIT_DAGSTER_JOB_NAMES,
     dagster_jobs_for_sync_run,
 )
-from utils import overlap_lock
 
 
 class CapturingLog:
@@ -106,7 +106,7 @@ def test_subprocess_timeout_force_kills_captures_both_streams_and_releases_lock(
     with pytest.raises(dg.Failure) as raised:
         runner.run_module(
             context,  # type: ignore[arg-type]
-            "jobs.sync_trackunit_daily_activity",
+            "ge_data_platform.sources.trackunit.daily_activity",
             overlap_group=runner.TRACKUNIT_OVERLAP_GROUP,
             timeout_minutes=0.001,
             terminate_grace_seconds=0,
@@ -141,9 +141,9 @@ def test_timeout_and_terminate_grace_environment_settings(
     monkeypatch.setenv("TRACKUNIT_JOB_TIMEOUT_MINUTES", "180")
     monkeypatch.setenv("ETL_SUBPROCESS_TERMINATE_GRACE_SECONDS", "4.5")
 
-    assert runner.get_module_timeout_minutes("jobs.sync_sendem") == 17.5
-    assert runner.get_module_timeout_minutes("jobs.sync_ezytrack") == 23
-    assert runner.get_module_timeout_minutes("jobs.sync_trackunit_location_enrichment") == 180
+    assert runner.get_module_timeout_minutes("ge_data_platform.sources.sendem.sync") == 17.5
+    assert runner.get_module_timeout_minutes("ge_data_platform.sources.ezytrack.sync") == 23
+    assert runner.get_module_timeout_minutes("ge_data_platform.sources.trackunit.location") == 180
     assert runner.get_terminate_grace_seconds() == 4.5
 
 
@@ -264,7 +264,7 @@ def test_reconciliation_and_trackunit_jobs_pass_exact_cli_modes(
 
     assert definitions.ezytrack_daily_reconciliation.execute_in_process().success
     assert calls.pop() == (
-        "jobs.sync_ezytrack",
+        "ge_data_platform.sources.ezytrack.sync",
         ("--reconcile",),
         runner.EZYTRACK_OVERLAP_GROUP,
         None,
@@ -273,7 +273,7 @@ def test_reconciliation_and_trackunit_jobs_pass_exact_cli_modes(
 
     assert definitions.trackunit_rolling_7_days.execute_in_process().success
     assert calls.pop() == (
-        "jobs.sync_trackunit_daily_activity",
+        "ge_data_platform.sources.trackunit.daily_activity",
         ("--rolling-days", "7"),
         runner.TRACKUNIT_OVERLAP_GROUP,
         None,
@@ -282,7 +282,7 @@ def test_reconciliation_and_trackunit_jobs_pass_exact_cli_modes(
 
     assert definitions.trackunit_intraday_refresh.execute_in_process().success
     assert calls.pop() == (
-        "jobs.sync_trackunit_daily_activity",
+        "ge_data_platform.sources.trackunit.daily_activity",
         ("--rolling-days", "1"),
         runner.TRACKUNIT_OVERLAP_GROUP,
         None,
@@ -295,14 +295,14 @@ def test_reconciliation_and_trackunit_jobs_pass_exact_cli_modes(
     assert definitions.trackunit_daily_refresh.execute_in_process().success
     assert calls == [
         (
-            "jobs.sync_trackunit_daily_activity",
+            "ge_data_platform.sources.trackunit.daily_activity",
             ("--rolling-days", "2"),
             None,
             runner.TRACKUNIT_OVERLAP_GROUP,
             120.0,
         ),
         (
-            "jobs.sync_trackunit_location_enrichment",
+            "ge_data_platform.sources.trackunit.location",
             (),
             None,
             runner.TRACKUNIT_OVERLAP_GROUP,

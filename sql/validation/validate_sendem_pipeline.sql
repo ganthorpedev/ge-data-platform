@@ -1,7 +1,7 @@
 -- Sendem ETL + warehouse validation pack.
 -- Read-only. Creates nothing, alters nothing.
 --
--- Sections 7-9 assume sql/002_create_sendem_warehouse_views.sql has already
+-- Sections 7-9 assume sql/migrations/002_create_sendem_warehouse_views.sql has already
 -- been run. If it has not, those queries will fail clearly with
 -- "relation ... does not exist" -- that failure is intentional, not hidden.
 

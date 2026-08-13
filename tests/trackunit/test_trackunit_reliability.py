@@ -7,10 +7,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from config.settings import HttpSettings, TrackunitSettings
-from connectors.trackunit_client import TrackunitClient
-from jobs import sync_trackunit_daily_activity, sync_trackunit_location_enrichment
-from transforms.trackunit_transform import (
+from ge_data_platform.common import overlap as overlap_lock
+from ge_data_platform.config.settings import HttpSettings, TrackunitSettings
+from ge_data_platform.sources.trackunit import daily_activity, location
+from ge_data_platform.sources.trackunit.client import TrackunitClient
+from ge_data_platform.sources.trackunit.transform import (
     DATA_QUALITY_COUNTER_RESET,
     DATA_QUALITY_LIVE,
     build_daily_activity_rows,
@@ -18,7 +19,6 @@ from transforms.trackunit_transform import (
     cumulative_distance_delta_km,
     cumulative_hours_delta_minutes,
 )
-from utils import overlap_lock
 
 
 def _settings(
@@ -140,10 +140,10 @@ def test_retry_after_429_is_respected_and_logs_metric_and_pin(
         ]
     )
     sleep = Mock()
-    monkeypatch.setattr("connectors.trackunit_client.time.sleep", sleep)
-    monkeypatch.setattr("connectors.trackunit_client.random.uniform", lambda _low, _high: 1.25)
+    monkeypatch.setattr("ge_data_platform.sources.trackunit.client.time.sleep", sleep)
+    monkeypatch.setattr("ge_data_platform.sources.trackunit.client.random.uniform", lambda _low, _high: 1.25)
 
-    with caplog.at_level("WARNING", logger="connectors.trackunit_client"):
+    with caplog.at_level("WARNING", logger="ge_data_platform.sources.trackunit.client"):
         client.get_aemp_series(
             "PIN-9",
             "Distance",
@@ -174,8 +174,8 @@ def test_every_authenticated_get_retries_429(monkeypatch: pytest.MonkeyPatch) ->
         ]
     )
     sleep = Mock()
-    monkeypatch.setattr("connectors.trackunit_client.time.sleep", sleep)
-    monkeypatch.setattr("connectors.trackunit_client.random.uniform", lambda _low, _high: 0)
+    monkeypatch.setattr("ge_data_platform.sources.trackunit.client.time.sleep", sleep)
+    monkeypatch.setattr("ge_data_platform.sources.trackunit.client.random.uniform", lambda _low, _high: 0)
 
     client.get_assets()
     client.get_aemp_series(
@@ -206,8 +206,8 @@ def test_invalid_retry_after_uses_exponential_fallback(monkeypatch: pytest.Monke
         ]
     )
     sleep = Mock()
-    monkeypatch.setattr("connectors.trackunit_client.time.sleep", sleep)
-    monkeypatch.setattr("connectors.trackunit_client.random.uniform", lambda _low, _high: 0.5)
+    monkeypatch.setattr("ge_data_platform.sources.trackunit.client.time.sleep", sleep)
+    monkeypatch.setattr("ge_data_platform.sources.trackunit.client.random.uniform", lambda _low, _high: 0.5)
 
     client.get_aemp_series(
         "PIN-1",
@@ -226,8 +226,8 @@ def test_persistent_429_stops_at_seven_total_attempts(monkeypatch: pytest.Monkey
         side_effect=[_response(429) for _ in range(7)]
     )
     sleep = Mock()
-    monkeypatch.setattr("connectors.trackunit_client.time.sleep", sleep)
-    monkeypatch.setattr("connectors.trackunit_client.random.uniform", lambda _low, _high: 0)
+    monkeypatch.setattr("ge_data_platform.sources.trackunit.client.time.sleep", sleep)
+    monkeypatch.setattr("ge_data_platform.sources.trackunit.client.random.uniform", lambda _low, _high: 0)
 
     with pytest.raises(RuntimeError, match=r"429.*after 7 attempt\(s\).+metric=Distance.+pin=PIN-7"):
         client.get_aemp_series(
@@ -252,7 +252,7 @@ def test_transient_5xx_retries_are_bounded(monkeypatch: pytest.MonkeyPatch) -> N
         ]
     )
     sleep = Mock()
-    monkeypatch.setattr("connectors.trackunit_client.time.sleep", sleep)
+    monkeypatch.setattr("ge_data_platform.sources.trackunit.client.time.sleep", sleep)
 
     client.get_assets()
 
@@ -264,7 +264,7 @@ def test_ordinary_4xx_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client()
     client.session.request = Mock(return_value=_response(400))  # type: ignore[method-assign]
     sleep = Mock()
-    monkeypatch.setattr("connectors.trackunit_client.time.sleep", sleep)
+    monkeypatch.setattr("ge_data_platform.sources.trackunit.client.time.sleep", sleep)
 
     with pytest.raises(RuntimeError, match="get_assets failed: 400"):
         client.get_assets()
@@ -279,7 +279,7 @@ def test_configured_aemp_request_pacing_is_applied(monkeypatch: pytest.MonkeyPat
         return_value=_response(200, {"distance": []})
     )
     sleep = Mock()
-    monkeypatch.setattr("connectors.trackunit_client.time.sleep", sleep)
+    monkeypatch.setattr("ge_data_platform.sources.trackunit.client.time.sleep", sleep)
 
     client.get_aemp_series(
         "PIN-1",
@@ -439,13 +439,13 @@ def test_daily_job_preserves_original_error_when_failed_bookkeeping_fails(
         def authenticate(self) -> None:
             raise original_error
 
-    monkeypatch.setattr(sync_trackunit_daily_activity, "get_settings", lambda: object())
-    monkeypatch.setattr(sync_trackunit_daily_activity, "get_trackunit_settings", _settings)
-    monkeypatch.setattr(sync_trackunit_daily_activity, "PostgresLoader", FakeLoader)
-    monkeypatch.setattr(sync_trackunit_daily_activity, "TrackunitClient", FakeClient)
+    monkeypatch.setattr(daily_activity, "get_settings", lambda: object())
+    monkeypatch.setattr(daily_activity, "get_trackunit_settings", _settings)
+    monkeypatch.setattr(daily_activity, "PostgresLoader", FakeLoader)
+    monkeypatch.setattr(daily_activity, "TrackunitClient", FakeClient)
 
     with pytest.raises(RuntimeError) as raised:
-        sync_trackunit_daily_activity.run(date_arg="2026-08-01")
+        daily_activity.run(date_arg="2026-08-01")
 
     assert raised.value is original_error
 
@@ -472,14 +472,14 @@ def test_location_job_preserves_original_error_when_failed_bookkeeping_fails(
         def authenticate(self) -> None:
             raise original_error
 
-    monkeypatch.setattr(sync_trackunit_location_enrichment, "get_settings", lambda: object())
-    monkeypatch.setattr(sync_trackunit_location_enrichment, "get_trackunit_settings", _settings)
-    monkeypatch.setattr(sync_trackunit_location_enrichment, "PostgresLoader", FakeLoader)
-    monkeypatch.setattr(sync_trackunit_location_enrichment, "TrackunitClient", FakeClient)
-    monkeypatch.setattr(sync_trackunit_location_enrichment, "_fetch_activity_rows", lambda *_args: [])
+    monkeypatch.setattr(location, "get_settings", lambda: object())
+    monkeypatch.setattr(location, "get_trackunit_settings", _settings)
+    monkeypatch.setattr(location, "PostgresLoader", FakeLoader)
+    monkeypatch.setattr(location, "TrackunitClient", FakeClient)
+    monkeypatch.setattr(location, "_fetch_activity_rows", lambda *_args: [])
 
     with pytest.raises(RuntimeError) as raised:
-        sync_trackunit_location_enrichment.run(date(2026, 8, 1))
+        location.run(date(2026, 8, 1))
 
     assert raised.value is original_error
 
@@ -488,11 +488,11 @@ def test_location_job_preserves_original_error_when_failed_bookkeeping_fails(
     ("run_job", "kwargs"),
     [
         (
-            sync_trackunit_daily_activity.run,
+            daily_activity.run,
             {"date_arg": "2026-08-01"},
         ),
         (
-            sync_trackunit_location_enrichment.run,
+            location.run,
             {"report_date": date(2026, 8, 1)},
         ),
     ],

@@ -12,7 +12,7 @@
 -- NOTES ON TYPE CHOICES:
 --   1. Money columns (credit, debit, inclusive_amount, tax_amount) are
 --      NUMERIC(20, 4), matching the CAST(... AS DECIMAL(20, 4)) applied in
---      sql/accounts/evolution/project_reports/extract_project_reports.sql.
+--      sql/sources/evolution/project_reports/extract_project_reports.sql.
 --      Combined with coerce_float=False on extraction, values travel from
 --      SQL Server to PostgreSQL as decimal.Decimal end to end -- never
 --      rounded through a binary float.
@@ -31,7 +31,7 @@
 --      (only dates are ever printed/compared, never times).
 
 CREATE SCHEMA IF NOT EXISTS raw;
--- Also needed here (not just by sql/001_create_sendem_schema.sql) because
+-- Also needed here (not just by sql/migrations/001_create_sendem_schema.sql) because
 -- replace_accounts_evolution_project_reports() stages every load in a
 -- staging.evolution_project_reports_stage_* table before the atomic swap.
 CREATE SCHEMA IF NOT EXISTS staging;

@@ -13,7 +13,7 @@ Run the sync with:
 
 EXTRACTION
 This module is the only place that should run the project-reports SQL
-query. It reads sql/accounts/evolution/project_reports/extract_project_reports.sql
+query. It reads sql/sources/evolution/project_reports/extract_project_reports.sql
 once, then executes it against every configured Evolution source database
 (ge_data_platform.config.settings.EvolutionSettings.sources) through the same
 function -- there is no per-company extraction pipeline.
@@ -81,7 +81,7 @@ SOURCE_COLUMNS = [
     "TransactionDescription",
 ]
 
-_SQL_PATH = Path(__file__).resolve().parents[4] / "sql" / "accounts" / "evolution" / "project_reports" / "extract_project_reports.sql"
+_SQL_PATH = Path(__file__).resolve().parents[4] / "sql" / "sources" / "evolution" / "project_reports" / "extract_project_reports.sql"
 
 BUSINESS_UNIT_CUTOVER_DATE = pd.Timestamp("2026-03-01")
 

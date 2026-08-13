@@ -185,8 +185,8 @@ def prepare_dataframe_for_load(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # The exact raw.evolution_project_reports column set (excluding loaded_at,
-# which prepare_dataframe_for_load adds), matching sql/029_create_accounts_
-# evolution_project_reports_schema.sql. Unlike the telemetry providers'
+# which prepare_dataframe_for_load adds), matching sql/migrations/029_create_
+# accounts_evolution_project_reports_schema.sql. Unlike the telemetry providers'
 # upsert_dataframe (which introspects the destination via
 # information_schema.columns because upstream API payloads can drift), this
 # pipeline fully owns its DDL and its transform's output columns are fixed,

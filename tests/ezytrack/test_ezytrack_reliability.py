@@ -7,9 +7,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from config.settings import EzytrackSettings
-from connectors.ezytrack_client import EzytrackClient
-from jobs import sync_ezytrack
+from ge_data_platform.config.settings import EzytrackSettings
+from ge_data_platform.sources.ezytrack import sync
+from ge_data_platform.sources.ezytrack.client import EzytrackClient
 
 
 def _settings(*, max_pages: int = 500) -> EzytrackSettings:
@@ -75,7 +75,7 @@ def test_max_page_count_stops_pagination() -> None:
 def test_first_run_preserves_existing_default_lookback() -> None:
     end = datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
 
-    start, resolved_end = sync_ezytrack.calculate_sync_window(
+    start, resolved_end = sync.calculate_sync_window(
         end_time=end,
         default_lookback_hours=6,
         max_catchup_hours=168,
@@ -90,7 +90,7 @@ def test_success_cursor_uses_overlap() -> None:
     end = datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
     last_window_end = end - timedelta(hours=4)
 
-    start, _ = sync_ezytrack.calculate_sync_window(
+    start, _ = sync.calculate_sync_window(
         end_time=end,
         default_lookback_hours=6,
         max_catchup_hours=168,
@@ -105,7 +105,7 @@ def test_automatic_catchup_is_capped() -> None:
     end = datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
     very_old_success = end - timedelta(days=30)
 
-    start, _ = sync_ezytrack.calculate_sync_window(
+    start, _ = sync.calculate_sync_window(
         end_time=end,
         default_lookback_hours=6,
         max_catchup_hours=168,
@@ -119,7 +119,7 @@ def test_automatic_catchup_is_capped() -> None:
 def test_reconciliation_uses_its_configured_lookback() -> None:
     end = datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
 
-    start, _ = sync_ezytrack.calculate_sync_window(
+    start, _ = sync.calculate_sync_window(
         end_time=end,
         default_lookback_hours=6,
         max_catchup_hours=168,
@@ -154,13 +154,13 @@ def test_job_preserves_original_error_when_failed_bookkeeping_also_fails(monkeyp
         def authenticate(self) -> None:
             raise original_error
 
-    monkeypatch.setattr(sync_ezytrack, "get_settings", lambda: object())
-    monkeypatch.setattr(sync_ezytrack, "get_ezytrack_settings", _settings)
-    monkeypatch.setattr(sync_ezytrack, "PostgresLoader", FakeLoader)
-    monkeypatch.setattr(sync_ezytrack, "EzytrackClient", FakeClient)
+    monkeypatch.setattr(sync, "get_settings", lambda: object())
+    monkeypatch.setattr(sync, "get_ezytrack_settings", _settings)
+    monkeypatch.setattr(sync, "PostgresLoader", FakeLoader)
+    monkeypatch.setattr(sync, "EzytrackClient", FakeClient)
 
     with pytest.raises(RuntimeError) as raised:
-        sync_ezytrack.run(now_utc=datetime(2026, 8, 3, 12, tzinfo=timezone.utc))
+        sync.run(now_utc=datetime(2026, 8, 3, 12, tzinfo=timezone.utc))
 
     assert raised.value is original_error
 

@@ -2,7 +2,7 @@
 database-ready tables.
 
 This module owns dataframe construction and derived-metric calculation for
-EzyTrack. Column sets match sql/010_create_ezytrack_schema.sql exactly
+EzyTrack. Column sets match sql/migrations/010_create_ezytrack_schema.sql exactly
 (excluding `loaded_at`, which is a database-side default column added by the
 loader per upsert batch, the same convention
 ge_data_platform.sources.sendem.transform and ge_data_platform.common.

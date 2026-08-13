@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from loaders.postgres_loader import validate_combined_for_full_replace
+from ge_data_platform.common.database import validate_combined_for_full_replace
 
 
 def _valid_df() -> pd.DataFrame:

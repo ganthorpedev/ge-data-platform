@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from config.settings import validate_evolution_view_name
+from ge_data_platform.config.settings import validate_evolution_view_name
 
 
 @pytest.mark.parametrize(

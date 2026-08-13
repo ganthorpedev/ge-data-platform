@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
-from loaders.postgres_loader import EVOLUTION_PROJECT_REPORTS_COLUMNS, PostgresLoader
+from ge_data_platform.common.database import EVOLUTION_PROJECT_REPORTS_COLUMNS, PostgresLoader
 
 
 def _make_loader() -> PostgresLoader:

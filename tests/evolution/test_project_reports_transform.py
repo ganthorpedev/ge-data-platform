@@ -5,8 +5,8 @@ from decimal import Decimal
 import pandas as pd
 import pytest
 
-from connectors.accounts.evolution.project_reports import SOURCE_COLUMNS
-from transforms.accounts.evolution.project_reports_transform import (
+from ge_data_platform.sources.evolution.project_reports import (
+    SOURCE_COLUMNS,
     build_combined,
     combine_data,
     determine_business_unit,
@@ -50,7 +50,7 @@ def _row(**overrides: object) -> dict[str, object]:
 
 
 def _dataset(company: str, rows: list[dict[str, object]]) -> pd.DataFrame:
-    """Build a per-company DataFrame the way connectors...extract_company() does:
+    """Build a per-company DataFrame the way extract_company() does:
     company inserted as the first column, all SOURCE_COLUMNS present.
     """
     frame = pd.DataFrame(rows)

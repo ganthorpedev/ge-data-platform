@@ -29,7 +29,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA reporting TO powerbi_reader;
 -- sql/022_... (ALTER DEFAULT PRIVILEGES only applies to objects created by
 -- the role executing this statement, so run this as the same user/role that
 -- owns the reporting views -- typically the same admin/service account used
--- for sql/022_create_reporting_powerbi_views.sql).
+-- for sql/migrations/022_create_reporting_powerbi_views.sql).
 ALTER DEFAULT PRIVILEGES IN SCHEMA reporting
     GRANT SELECT ON TABLES TO powerbi_reader;
 

@@ -6,14 +6,14 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from loaders.postgres_loader import (
+from ge_data_platform.common.database import (
     POST_LOAD_VALIDATION_QUERIES,
     PostgresLoader,
     finish_sync_run_failed_safe,
     prepare_dataframe_for_load,
 )
-from transforms.sendem_transform import FACT_EVENTS_COLUMNS, FACT_TRIPS_COLUMNS, build_all
-from utils.http import build_retrying_session
+from ge_data_platform.common.http import build_retrying_session
+from ge_data_platform.sources.sendem.transform import FACT_EVENTS_COLUMNS, FACT_TRIPS_COLUMNS, build_all
 
 
 def _raw_payload(**overrides: list[dict]) -> dict[str, list[dict]]:

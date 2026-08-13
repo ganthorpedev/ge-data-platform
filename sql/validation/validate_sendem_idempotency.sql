@@ -1,10 +1,8 @@
 -- Sendem reliability/idempotency validation pack.
 -- Read-only. Creates nothing, alters nothing.
 --
--- Note: this file shares the "003_" prefix with the existing
--- sql/003_validate_sendem_pipeline.sql. Both are read-only validation
--- scripts and can be run independently in any order; if you use a strict
--- numbered-migration runner, rename one of them before adopting that tool.
+-- Companion to sql/validation/validate_sendem_pipeline.sql. Both are
+-- read-only validation scripts and can be run independently in any order.
 
 -- =============================================================================
 -- 1. Constraint inspection: does every UPSERT target have the expected

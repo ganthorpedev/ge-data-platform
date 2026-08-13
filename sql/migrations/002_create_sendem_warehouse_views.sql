@@ -1,6 +1,6 @@
 -- Sendem/MiX warehouse reporting views.
 -- Built only from staging.* tables, whose columns are taken directly from
--- sql/001_create_sendem_schema.sql (the DDL actually applied and proven by
+-- sql/migrations/001_create_sendem_schema.sql (the DDL actually applied and proven by
 -- the working sync). No table structure is changed here -- views only.
 --
 -- Rerunnable: CREATE OR REPLACE VIEW is used throughout.

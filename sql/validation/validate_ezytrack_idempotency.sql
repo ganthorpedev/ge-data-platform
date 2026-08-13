@@ -5,7 +5,7 @@
 -- 1. Constraint inspection: does every UPSERT target have the expected
 --    PRIMARY KEY / UNIQUE constraint on its idempotency key?
 --    Same type-safe array comparison fix used in
---    sql/003_validate_sendem_idempotency.sql (kcu.column_name cast to text,
+--    sql/validation/validate_sendem_idempotency.sql (kcu.column_name cast to text,
 --    so actual_columns is text[] and comparable to the text[] literals in
 --    expected_columns).
 -- =============================================================================

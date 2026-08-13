@@ -330,18 +330,19 @@ full-history packs are not run after every small sync. After a backfill or
 reconciliation, run the appropriate read-only pack manually:
 
 ```powershell
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\003_validate_sendem_pipeline.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\003_validate_sendem_idempotency.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\011_validate_ezytrack_idempotency.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\021_validate_trackunit_daily_activity.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\023_validate_reporting_powerbi_views.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\026_validate_trackunit_location_enrichment.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\validation\validate_sendem_pipeline.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\validation\validate_sendem_idempotency.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\validation\validate_ezytrack_idempotency.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\validation\validate_trackunit_daily_activity.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\validation\validate_reporting_powerbi_views.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\validation\validate_trackunit_location_enrichment.sql
 ```
 
 Add `-h`, `-p`, and `-U` if the normal PostgreSQL client defaults do not target
 the warehouse. Do not put the password on the command line.
-Trackunit location enrichment relies on its manual 026 pack rather than an
-automatic post-load check.
+Trackunit location enrichment relies on its manual
+validate_trackunit_location_enrichment.sql pack rather than an automatic
+post-load check.
 
 Trackunit cumulative counter decreases are not clamped. The affected derived
 operating, moving, or distance metric is stored as `NULL`, while
@@ -415,8 +416,8 @@ apply the reliability migrations in numeric order before starting the hardened
 jobs:
 
 ```powershell
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\027_add_trackunit_counter_quality.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\028_add_sync_run_abandoned_support.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\027_add_trackunit_counter_quality.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\028_add_sync_run_abandoned_support.sql
 ```
 
 Migration 027 adds Trackunit counter-quality columns, repairs historical
@@ -438,17 +439,17 @@ legacy `clean.sendem_*` tables. An empty database needs this object-creation
 order before the validation packs:
 
 ```powershell
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\001_create_sendem_schema.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\001_create_sendem_schema.sql
 psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -c 'CREATE SCHEMA IF NOT EXISTS clean;'
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\sendem_tables.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\002_create_sendem_warehouse_views.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\004_create_etl_sync_table_loads.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\010_create_ezytrack_schema.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\020_create_trackunit_schema.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\025_create_trackunit_location_enrichment.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\022_create_reporting_powerbi_views.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\027_add_trackunit_counter_quality.sql
-psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\028_add_sync_run_abandoned_support.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\sendem_tables.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\002_create_sendem_warehouse_views.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\004_create_etl_sync_table_loads.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\010_create_ezytrack_schema.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\020_create_trackunit_schema.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\025_create_trackunit_location_enrichment.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\022_create_reporting_powerbi_views.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\027_add_trackunit_counter_quality.sql
+psql -X -v ON_ERROR_STOP=1 -d telemetry_warehouse -f .\sql\migrations\028_add_sync_run_abandoned_support.sql
 ```
 
 Apply the separately controlled Power BI reader-role script only after replacing
@@ -507,7 +508,7 @@ LIMIT 100;
 
 Reset rows must have `data_quality_status='COUNTER_RESET'`; each affected
 derived metric is `NULL`, while unaffected metrics and raw counter readings are
-preserved. `sql/021_validate_trackunit_daily_activity.sql` also checks the
+preserved. `sql/validation/validate_trackunit_daily_activity.sql` also checks the
 staging/reporting propagation and non-negative invariant.
 
 ## Inspect sync and table-load history
