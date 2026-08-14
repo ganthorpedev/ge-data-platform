@@ -133,11 +133,16 @@ def test_load_ezytrack_tables_rejects_unknown_target() -> None:
 
 
 def test_get_last_successful_run_returns_none_without_db_access_for_platform_loader() -> None:
-    # enable_sync_tracking is always False for a platform-settings loader --
-    # this must short-circuit BEFORE any query is issued, since etl.sync_runs
-    # does not exist in ge_warehouse at all.
+    # tracking_backend is always "platform" for a platform-settings loader,
+    # and get_last_successful_run must short-circuit BEFORE any query is
+    # issued -- not because etl.sync_runs doesn't exist in ge_warehouse
+    # (true, but incidental), but because ops.pipeline_run is audit history,
+    # never a catch-up cursor. See
+    # tests/platform/test_ops_audit.py::test_get_last_successful_run_returns_none_for_platform_even_with_real_success_history
+    # for the stronger version of this guarantee (proven against a real ops
+    # schema that actually holds a SUCCESS row).
     loader = PostgresLoader.from_platform_settings(_platform_settings())
-    assert loader.enable_sync_tracking is False
+    assert loader.tracking_backend == "platform"
 
     class ExplodingEngine:
         def connect(self):
@@ -149,10 +154,10 @@ def test_get_last_successful_run_returns_none_without_db_access_for_platform_loa
 
 
 def test_get_last_successful_run_still_queries_for_legacy_loader(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Regression guard: legacy behavior (sync tracking enabled) must be
+    # Regression guard: legacy behavior (etl.sync_runs lookup) must be
     # completely unaffected by the platform-target guard added above.
     loader = PostgresLoader(_legacy_settings())
-    assert loader.enable_sync_tracking is True
+    assert loader.tracking_backend == "legacy"
 
     calls: list[str] = []
 

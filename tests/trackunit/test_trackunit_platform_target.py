@@ -40,12 +40,12 @@ def _platform_settings() -> PlatformSettings:
     )
 
 
-def test_from_platform_settings_targets_ge_warehouse_and_disables_sync_tracking() -> None:
+def test_from_platform_settings_targets_ge_warehouse_and_uses_platform_tracking_backend() -> None:
     loader = PostgresLoader.from_platform_settings(_platform_settings())
 
     assert loader.engine.url.database == "ge_warehouse"
     assert loader.engine.url.host == "localhost"
-    assert loader.enable_sync_tracking is False
+    assert loader.tracking_backend == "platform"
 
 
 def test_direct_construction_still_targets_settings_postgres_db() -> None:
@@ -53,7 +53,7 @@ def test_direct_construction_still_targets_settings_postgres_db() -> None:
     loader = PostgresLoader(_legacy_settings())
 
     assert loader.engine.url.database == "telemetry_warehouse"
-    assert loader.enable_sync_tracking is True
+    assert loader.tracking_backend == "legacy"
 
 
 def test_database_override_takes_precedence_over_settings_postgres_db() -> None:
@@ -62,30 +62,75 @@ def test_database_override_takes_precedence_over_settings_postgres_db() -> None:
     assert loader.engine.url.database == "some_other_db"
 
 
-def test_sync_tracking_disabled_start_sync_run_returns_id_without_db_access() -> None:
+def test_platform_start_sync_run_and_start_table_load_write_to_ops() -> None:
+    # Platform tracking is no longer a no-op: start_sync_run/start_table_load
+    # now insert into ops.pipeline_run/ops.table_load (via
+    # ge_data_platform.common.audit) instead of skipping bookkeeping. Full
+    # dispatch/isolation coverage lives in tests/platform/test_ops_audit.py;
+    # this is Trackunit's own proof that its call pattern reaches ops.*.
     loader = PostgresLoader.from_platform_settings(_platform_settings())
+    calls: list[tuple[str, dict]] = []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, statement, params=None):
+            calls.append((str(statement), dict(params or {})))
+
+            class _Result:
+                def scalar_one(_self) -> int:
+                    return 99
+
+            return _Result()
+
+    class FakeEngine:
+        def begin(self):
+            return FakeConnection()
+
+    loader.engine = FakeEngine()  # type: ignore[assignment]
 
     sync_run_id = loader.start_sync_run(
         source_system="trackunit", job_name="trackunit_daily_activity_sync", start_date=20260101, end_date=20260101
     )
+    load_id = loader.start_table_load(sync_run_id, "trackunit", "raw_trackunit", "asset", rows_input=1)
 
-    assert isinstance(sync_run_id, str) and sync_run_id  # generated, just not persisted
+    assert isinstance(sync_run_id, str) and sync_run_id
+    assert load_id == 99
+    assert len(calls) == 2
+    assert all("ops." in sql and "etl." not in sql for sql, _params in calls)
 
 
-def test_sync_tracking_disabled_start_table_load_returns_none() -> None:
+def test_platform_finish_sync_run_and_finish_table_load_write_ops_rows() -> None:
     loader = PostgresLoader.from_platform_settings(_platform_settings())
+    calls: list[tuple[str, dict]] = []
 
-    load_id = loader.start_table_load("some-run-id", "trackunit", "raw_trackunit", "asset", rows_input=1)
+    class FakeConnection:
+        def __enter__(self):
+            return self
 
-    assert load_id is None
+        def __exit__(self, *args):
+            return False
 
+        def execute(self, statement, params=None):
+            calls.append((str(statement), dict(params or {})))
+            return None
 
-def test_sync_tracking_disabled_finish_sync_run_and_finish_table_load_are_noops() -> None:
-    loader = PostgresLoader.from_platform_settings(_platform_settings())
+    class FakeEngine:
+        def begin(self):
+            return FakeConnection()
 
-    # Must not raise / must not attempt any DB I/O.
+    loader.engine = FakeEngine()  # type: ignore[assignment]
+
+    # Must actually write now (no longer a silent no-op).
     loader.finish_sync_run(sync_run_id="fake", status="SUCCESS")
     loader.finish_table_load(load_id=123, status="SUCCESS")
+
+    assert len(calls) == 2
+    assert all("ops." in sql and "etl." not in sql for sql, _params in calls)
 
 
 def _empty_daily_activity_dataframes() -> dict[str, pd.DataFrame]:

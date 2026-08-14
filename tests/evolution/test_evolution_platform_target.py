@@ -51,7 +51,7 @@ def _make_loader() -> PostgresLoader:
 
     loader = PostgresLoader.__new__(PostgresLoader)
     loader.engine = engine
-    loader.enable_sync_tracking = False
+    loader.tracking_backend = "platform"
     return loader
 
 
