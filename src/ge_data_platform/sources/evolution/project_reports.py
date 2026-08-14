@@ -28,8 +28,9 @@ notebook. None of it is reinterpreted here.
 
 SYNC
 Orchestrates extract -> transform -> load
-(ge_data_platform.common.database), and records the run in etl.sync_runs,
-the same bookkeeping tables the telemetry providers use.
+(ge_data_platform.common.database), and records the run in etl.sync_runs
+(legacy target) or ops.pipeline_run (platform target) -- the same
+bookkeeping mechanism the telemetry providers use.
 """
 
 from __future__ import annotations
@@ -308,11 +309,13 @@ def run(*, target: str = "legacy") -> None:
     layers -- `raw_evolution.project_report` (source-faithful, no
     `business_unit`) and `stg_evolution.project_report` (adds
     `business_unit`) -- via `PostgresLoader.from_platform_settings` and
-    `replace_evolution_project_reports_platform`. Skips
-    `etl.sync_runs`/`etl.sync_table_loads` bookkeeping (handled by
-    `enable_sync_tracking=False`, same as the other three sources' platform
-    target) and skips post-load validation (hardcoded to legacy schema
-    names). Opt-in, manual-only, not wired to any Dagster schedule. See
+    `replace_evolution_project_reports_platform`. Records the run and each
+    table load in `ops.pipeline_run`/`ops.table_load` (via
+    `tracking_backend="platform"`, same as the other three sources' platform
+    target -- see `ge_data_platform.common.audit`) instead of
+    `etl.sync_runs`/`etl.sync_table_loads`, and still skips post-load
+    validation (hardcoded to legacy schema names). Opt-in, manual-only, not
+    wired to any Dagster schedule. See
     docs/migration/legacy-to-platform-migration.md#evolution-migration-completed.
     """
     configure_logging()

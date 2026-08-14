@@ -36,7 +36,8 @@ non-fatal: it is logged, the denied site_id is cached so it is never
 requested again this run, and the affected asset's row is marked
 PARTIAL/SITE_ACCESS_DENIED instead of aborting the sync. All other failures
 (auth-wide 401, database errors, invalid responses, exhausted 429/5xx
-retries) still stop the whole run and mark etl.sync_runs FAILED.
+retries) still stop the whole run and mark the run row FAILED (etl.sync_runs
+for legacy target, ops.pipeline_run for platform target).
 """
 
 from __future__ import annotations
@@ -239,8 +240,9 @@ def run(
     `target="legacy"` (default) reads/writes telemetry_warehouse raw/staging
     schemas -- unchanged. `target="platform"` reads/writes ge_warehouse
     raw_trackunit/stg_trackunit schemas instead -- see
-    docs/migration/legacy-to-platform-migration.md. Sync-run bookkeeping is
-    skipped for platform target (see PostgresLoader.from_platform_settings).
+    docs/migration/legacy-to-platform-migration.md. Run bookkeeping is
+    recorded in ops.pipeline_run/ops.table_load for platform target (see
+    PostgresLoader.from_platform_settings and ge_data_platform.common.audit).
     """
     if target not in ("legacy", "platform"):
         raise ValueError(f"target must be 'legacy' or 'platform', got {target!r}")

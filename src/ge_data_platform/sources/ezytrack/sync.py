@@ -11,8 +11,9 @@ Platform target (ge_warehouse, opt-in, manual only -- see below):
 
 This orchestrates: fetch (ge_data_platform.sources.ezytrack.client) ->
 transform (ge_data_platform.sources.ezytrack.transform) -> load
-(ge_data_platform.common.database), and records the run in etl.sync_runs /
-etl.sync_table_loads (legacy target only -- see below).
+(ge_data_platform.common.database), and records the run in
+etl.sync_runs/etl.sync_table_loads (legacy target) or
+ops.pipeline_run/ops.table_load (platform target) -- see below.
 
 RELIABLE CATCH-UP MODE:
 The first run uses the existing default lookback (6 hours by default).
@@ -29,16 +30,21 @@ nothing is loaded and the run is marked FAILED.
 
 PLATFORM TARGET AND CATCH-UP SAFETY:
 `--target platform` writes to raw_ezytrack.*/stg_ezytrack.* in ge_warehouse
-via PostgresLoader.from_platform_settings(). That database has no `etl`
-schema at all, so the catch-up cursor lookup (`get_last_successful_run`,
-which reads legacy `etl.sync_runs`) is never used for a platform-target run
--- `PostgresLoader.get_last_successful_run` returns None immediately when
-`enable_sync_tracking` is False (always the case for a platform-settings
-loader), so a platform-target run always computes its window as a
-first-run/explicit-window fetch, exactly like `--reconcile` already does by
-construction, never a multi-day catch-up inferred from a stale legacy
-cursor. `--lookback-hours` (below) additionally lets an operator supply an
-explicit small window for a manual platform-target test, overriding
+via PostgresLoader.from_platform_settings(), with the run and each table
+load recorded in ops.pipeline_run/ops.table_load (see
+ge_data_platform.common.audit) exactly like the legacy target records
+etl.sync_runs/etl.sync_table_loads. Despite ops.pipeline_run now holding
+real platform run history, the catch-up cursor lookup
+(`get_last_successful_run`) still ALWAYS returns None for a platform-target
+loader -- this is deliberate and unchanged: ops.pipeline_run is audit
+history, not the reconciliation cursor (`ops.source_watermark`, not yet
+populated by any job, is reserved for that), so it is never read back to
+compute a fetch window. A platform-target run therefore always computes its
+window as a first-run/explicit-window fetch, exactly like `--reconcile`
+already does by construction, never a multi-day catch-up inferred from
+either a stale legacy cursor or from ops.pipeline_run's own success history.
+`--lookback-hours` (below) additionally lets an operator supply an explicit
+small window for a manual platform-target test, overriding
 `EzytrackSettings.lookback_hours` for that one run only.
 
 AUTHENTICATION:
@@ -239,9 +245,9 @@ def run(
 ) -> None:
     """Execute one EzyTrack sync run: fetch, transform, load, and record the result.
 
-    Marks etl.sync_runs SUCCESS only if every chunk in the lookback window
-    was fetched successfully. Any failure marks the run FAILED with the
-    failing chunk's window in error_message and re-raises.
+    Marks the run SUCCESS only if every chunk in the lookback window was
+    fetched successfully. Any failure marks the run FAILED with the failing
+    chunk's window in error_message and re-raises.
 
     `target` selects the destination: "legacy" (default, unchanged
     behavior) writes raw.ezytrack_*/staging.ezytrack_* in
@@ -249,12 +255,13 @@ def run(
     bookkeeping, catch-up-cursor lookup, and post-load validation.
     "platform" writes raw_ezytrack.*/stg_ezytrack.* in ge_warehouse via
     PostgresLoader.from_platform_settings() -- same fetch/transform/retry/
-    pagination/dedup behavior, but sync tracking, the catch-up-cursor
-    lookup, and post-load validation are all skipped (ops.pipeline_run/
-    ops.table_load are not yet wired, `etl.sync_runs` does not exist in
-    ge_warehouse, and the post-load checks are hardcoded to legacy schema
-    names), matching the Trackunit/Sendem platform-target precedent -- see
-    docs/sources/ezytrack.md#ge_warehouse-platform-target.
+    pagination/dedup behavior, with the run and each table load recorded in
+    ops.pipeline_run/ops.table_load instead. The catch-up-cursor lookup
+    still always returns None for platform (deliberate -- see the
+    PLATFORM TARGET AND CATCH-UP SAFETY note above), and post-load
+    validation is still skipped for platform (its checks are hardcoded to
+    legacy schema names), matching the Trackunit/Sendem platform-target
+    precedent -- see docs/sources/ezytrack.md#ge_warehouse-platform-target.
 
     `lookback_hours`, if given, overrides `EzytrackSettings.lookback_hours`
     for this run only -- lets an operator supply an explicit small window
@@ -281,11 +288,13 @@ def run(
         loader = PostgresLoader(postgres_settings)
     client = EzytrackClient(ezytrack_settings)
 
-    # get_last_successful_run() returns None unconditionally when the loader
-    # has sync tracking disabled (always true for a platform-target loader
-    # -- see PostgresLoader.get_last_successful_run), so a platform-target
-    # run always falls through to first-run/explicit-window behavior below,
-    # never a catch-up window computed from telemetry_warehouse's cursor.
+    # get_last_successful_run() returns None unconditionally for a
+    # "platform" tracking_backend loader (see
+    # PostgresLoader.get_last_successful_run) -- ops.pipeline_run is audit
+    # history, not a catch-up cursor, so a platform-target run always falls
+    # through to first-run/explicit-window behavior below, never a catch-up
+    # window computed from either telemetry_warehouse's legacy cursor or
+    # ops.pipeline_run's own success history.
     last_success = None if reconcile else loader.get_last_successful_run(SOURCE_SYSTEM)
     success_cursor = _last_success_window_end(last_success)
     # Choose the window end after the lookup so it remains as close as

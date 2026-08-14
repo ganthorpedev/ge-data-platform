@@ -7,7 +7,7 @@ Run with:
 This orchestrates: fetch (ge_data_platform.sources.sendem.client) ->
 transform (ge_data_platform.sources.sendem.transform) -> load
 (ge_data_platform.common.database), and records the run in etl.sync_runs
-(legacy target only -- see below).
+(legacy target) or ops.pipeline_run (platform target) -- see below.
 """
 
 from __future__ import annotations
@@ -36,10 +36,11 @@ def run(*, lookback_days: int | None = None, target: str = "legacy") -> None:
     bookkeeping and post-load validation. "platform" writes
     raw_sendem.*/stg_sendem.* in ge_warehouse via
     PostgresLoader.from_platform_settings() -- same fetch/transform/retry/
-    empty-payload behavior, but sync tracking and post-load validation are
-    both skipped (ops.pipeline_run/ops.table_load are not yet wired, and the
-    post-load checks are hardcoded to legacy schema names), matching the
-    Trackunit platform-target precedent -- see
+    empty-payload behavior, with run/table-load bookkeeping recorded in
+    ops.pipeline_run/ops.table_load instead (see
+    ge_data_platform.common.audit); post-load validation is still skipped
+    for platform (its checks are hardcoded to legacy schema names), matching
+    the Trackunit platform-target precedent -- see
     docs/sources/trackunit.md#ge_warehouse-platform-target.
     """
     configure_logging()

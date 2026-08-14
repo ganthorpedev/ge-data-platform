@@ -3,7 +3,13 @@
 This module owns all database writes: connection creation, the generic
 strict upsert (upsert_dataframe), the per-provider raw/staging table load
 plans (load_sendem_tables, load_ezytrack_tables, load_trackunit_tables), and
-etl.sync_runs / etl.sync_table_loads tracking.
+pipeline-run/table-load tracking for both targets: legacy
+(etl.sync_runs / etl.sync_table_loads, in telemetry_warehouse) and platform
+(ops.pipeline_run / ops.table_load, in ge_warehouse, via
+ge_data_platform.common.audit). See `PostgresLoader.tracking_backend` for
+the dispatch point -- one set of call sites (start_sync_run, finish_sync_run,
+start_table_load, finish_table_load) is shared by both backends; only the
+destination table differs.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from ge_data_platform.config.settings import PlatformSettings, Settings
+from ge_data_platform.common import audit
 from ge_data_platform.common.dates import utc_now
 
 logger = logging.getLogger(__name__)
@@ -395,20 +402,28 @@ def validate_project_report_batch_for_platform_load(
 
 
 def finish_sync_run_failed_safe(loader: "PostgresLoader", sync_run_id: str, error: BaseException) -> None:
-    """Mark a sync run FAILED without ever masking the original job error.
+    """Mark a run FAILED without ever masking the original job error.
+
+    Backend-agnostic: `loader.finish_sync_run` itself dispatches to either
+    legacy etl.sync_runs or platform ops.pipeline_run based on
+    `loader.tracking_backend` -- this function's job is only to make that
+    bookkeeping call failure-safe, not to know which table it hits.
 
     If the FAILED bookkeeping update itself fails (e.g. the database is the
     thing that broke), the bookkeeping error is logged and swallowed so the
-    caller's `raise` re-raises the ORIGINAL exception, and the sync_runs row
-    is left in STARTED for the housekeeping job to mark ABANDONED later.
+    caller's `raise` re-raises the ORIGINAL exception, and the run row is
+    left in STARTED. For legacy this is picked up by the scheduled
+    stale-run cleanup job; for platform, ops.pipeline_run housekeeping
+    exists (PostgresLoader.mark_abandoned_pipeline_runs) but is not yet on a
+    schedule -- see docs/operations/pipeline-operations.md.
     """
     try:
         loader.finish_sync_run(sync_run_id=sync_run_id, status="FAILED", error_message=str(error))
     except Exception as bookkeeping_error:
         logger.error(
-            "Could not mark sync run %s as FAILED (bookkeeping error: %s). "
+            "Could not mark run %s as FAILED (bookkeeping error: %s). "
             "The original job error is preserved and re-raised; this run will "
-            "be picked up by stale-run cleanup as ABANDONED.",
+            "remain STARTED until stale-run cleanup marks it ABANDONED.",
             sync_run_id,
             bookkeeping_error,
         )
@@ -423,9 +438,15 @@ class PostgresLoader:
     target) is unaffected by the platform-target support added below. Use
     `PostgresLoader.from_platform_settings()` to target ge_warehouse instead
     -- see docs/migration/legacy-to-platform-migration.md.
+
+    Run/table-load bookkeeping (start_sync_run, finish_sync_run,
+    start_table_load, finish_table_load, get_last_successful_run,
+    mark_abandoned_runs/mark_abandoned_pipeline_runs) is the same call
+    surface for both targets; `self.tracking_backend` ("legacy" or
+    "platform") selects the destination underneath -- see `__init__`.
     """
 
-    def __init__(self, settings: Settings, *, database: str | None = None, enable_sync_tracking: bool = True) -> None:
+    def __init__(self, settings: Settings, *, database: str | None = None, tracking_backend: str = "legacy") -> None:
         """Create and store a SQLAlchemy engine from `settings`.
 
         pool_pre_ping revalidates pooled connections before use (the
@@ -435,11 +456,18 @@ class PostgresLoader:
 
         `database` overrides `settings.postgres_db` when given (used by
         `from_platform_settings` to target ge_warehouse without needing a
-        second settings dataclass). `enable_sync_tracking` gates all
-        etl.sync_runs/etl.sync_table_loads bookkeeping -- see
-        `from_platform_settings` for why it defaults to False there.
+        second settings dataclass). `tracking_backend` selects which
+        run/table-load bookkeeping tables start_sync_run/finish_sync_run/
+        start_table_load/finish_table_load write to: "legacy" (default)
+        uses telemetry_warehouse's etl.sync_runs/etl.sync_table_loads
+        exactly as before; "platform" uses ge_warehouse's
+        ops.pipeline_run/ops.table_load via ge_data_platform.common.audit
+        -- see `from_platform_settings`. Both backends always track (there
+        is no longer a fully-disabled state); only the destination differs.
         """
-        self.enable_sync_tracking = enable_sync_tracking
+        if tracking_backend not in ("legacy", "platform"):
+            raise ValueError(f"tracking_backend must be 'legacy' or 'platform', got {tracking_backend!r}")
+        self.tracking_backend = tracking_backend
         db_name = database if database is not None else settings.postgres_db
         password = quote_plus(settings.postgres_password)
         connection_string = (
@@ -459,15 +487,17 @@ class PostgresLoader:
 
         Reuses the shared Postgres host/port/user/password credentials (see
         PlatformSettings) with `database` overridden to
-        `platform_settings.ge_warehouse_db`. `enable_sync_tracking` is always
-        False here: ge_warehouse's ops.pipeline_run/ops.table_load tables
-        (the platform equivalents of legacy etl.sync_runs/
-        etl.sync_table_loads) are not yet wired into this loader -- see
+        `platform_settings.ge_warehouse_db`. `tracking_backend="platform"`
+        here: start_sync_run/finish_sync_run/start_table_load/
+        finish_table_load write to ge_warehouse's
+        ops.pipeline_run/ops.table_load (via ge_data_platform.common.audit)
+        instead of legacy etl.sync_runs/etl.sync_table_loads -- see
         docs/operations/pipeline-operations.md "ops metadata wiring status".
-        start_sync_run still returns a locally-generated id (nothing is
-        persisted); start_table_load/finish_table_load become no-ops.
+        get_last_successful_run still always returns None for this loader
+        (catch-up-cursor safety, unrelated to whether tracking is written --
+        see that method's docstring).
         """
-        return cls(platform_settings, database=platform_settings.ge_warehouse_db, enable_sync_tracking=False)
+        return cls(platform_settings, database=platform_settings.ge_warehouse_db, tracking_backend="platform")
 
     def test_connection(self) -> None:
         """Run a trivial query and print the connected database and user."""
@@ -577,15 +607,28 @@ class PostgresLoader:
         table: str,
         rows_input: int,
     ) -> int | None:
-        """Insert a STARTED row into etl.sync_table_loads and return its id.
+        """Insert a STARTED table-load row and return its id.
 
-        Returns None if `enable_sync_tracking` is False -- see
-        `start_sync_run`. `_run_load_plan` treats a None load_id exactly
-        like "no sync_run_id was given": `finish_table_load` is never called
-        for it.
+        Dispatches on `tracking_backend`: "legacy" inserts into
+        etl.sync_table_loads (telemetry_warehouse); "platform" inserts into
+        ops.table_load (ge_warehouse) via ge_data_platform.common.audit,
+        with `provider` mapped to ops.table_load.source_system and
+        `sync_run_id` to ops.table_load.pipeline_run_id. Both backends
+        always track now -- the `int | None` return type is kept only
+        because `_run_load_plan` still treats "no sync_run_id was given" as
+        a legitimate reason to skip table-load tracking (e.g. a caller that
+        never started a run at all); it is not a tracking-disabled signal
+        anymore.
         """
-        if not self.enable_sync_tracking:
-            return None
+        if self.tracking_backend == "platform":
+            return audit.start_table_load(
+                self.engine,
+                sync_run_id,
+                source_system=provider,
+                schema_name=schema,
+                table_name=table,
+                rows_input=rows_input,
+            )
 
         statement = text("""
             INSERT INTO etl.sync_table_loads
@@ -616,14 +659,15 @@ class PostgresLoader:
         rows_loaded: int = 0,
         error_message: str | None = None,
     ) -> None:
-        """Update an etl.sync_table_loads row with its final status and counts.
+        """Update a table-load row with its final status and counts.
 
-        No-op if `enable_sync_tracking` is False -- see `start_sync_run`.
-        `_run_load_plan` never calls this directly when tracking is disabled
-        (start_table_load already returned None), but this guard makes the
-        method safe to call on its own too.
+        Dispatches on `tracking_backend` exactly like `start_table_load`
+        (etl.sync_table_loads for "legacy", ops.table_load for "platform").
+        Zero `rows_loaded` with `status="SUCCESS"` is recorded as-is -- an
+        empty successful load is a real, valid outcome, not an error.
         """
-        if not self.enable_sync_tracking:
+        if self.tracking_backend == "platform":
+            audit.finish_table_load(self.engine, load_id, status=status, rows_loaded=rows_loaded, error_message=error_message)
             return
 
         statement = text("""
@@ -656,11 +700,11 @@ class PostgresLoader:
 
         Shared by load_sendem_tables and load_ezytrack_tables so the
         per-table-logging + upsert loop is defined once. If `sync_run_id` is
-        given, each table load is separately recorded in
-        etl.sync_table_loads (started before the upsert, finished after), so
-        a failure partway through leaves a clear per-table record of what
-        succeeded and what did not before the exception propagates to the
-        caller.
+        given, each table load is separately recorded (etl.sync_table_loads
+        or ops.table_load, per `tracking_backend` -- see `start_table_load`),
+        started before the upsert and finished after, so a failure partway
+        through leaves a clear per-table record of what succeeded and what
+        did not before the exception propagates to the caller.
 
         Returns a dict of "schema.table" -> rows loaded.
         """
@@ -722,9 +766,9 @@ class PostgresLoader:
         live platform-target load UPSERTs on the same natural key as any
         other row, so it never duplicates or conflicts with that history.
 
-        If `sync_run_id` is given, each table load is separately recorded in
-        etl.sync_table_loads (legacy target only -- see
-        `from_platform_settings`). See _run_load_plan for details.
+        If `sync_run_id` is given, each table load is separately recorded
+        (etl.sync_table_loads or ops.table_load, per `tracking_backend` --
+        see `from_platform_settings`). See _run_load_plan for details.
 
         Returns a dict of "schema.table" -> rows loaded.
         """
@@ -786,9 +830,9 @@ class PostgresLoader:
         -- only the destination schema/table names and database differ, same
         pattern as load_trackunit_tables/load_sendem_tables.
 
-        If `sync_run_id` is given, each table load is separately recorded in
-        etl.sync_table_loads (legacy target only -- see
-        `from_platform_settings`). See _run_load_plan for details.
+        If `sync_run_id` is given, each table load is separately recorded
+        (etl.sync_table_loads or ops.table_load, per `tracking_backend` --
+        see `from_platform_settings`). See _run_load_plan for details.
 
         Returns a dict of "schema.table" -> rows loaded.
         """
@@ -832,9 +876,9 @@ class PostgresLoader:
         006_create_stg_trackunit.sql). The column shapes are identical
         either way -- only the destination schema/table names differ.
 
-        If `sync_run_id` is given, each table load is separately recorded in
-        etl.sync_table_loads (legacy target only -- see
-        `from_platform_settings`). See _run_load_plan for details.
+        If `sync_run_id` is given, each table load is separately recorded
+        (etl.sync_table_loads or ops.table_load, per `tracking_backend` --
+        see `from_platform_settings`). See _run_load_plan for details.
 
         Returns a dict of "schema.table" -> rows loaded.
         """
@@ -885,9 +929,9 @@ class PostgresLoader:
         enrichment_df (as produced by jobs/sync_trackunit_location_enrichment.py).
         Raises `ValueError` if any of these keys are missing.
 
-        If `sync_run_id` is given, each table load is separately recorded in
-        etl.sync_table_loads (legacy target only). See _run_load_plan for
-        details.
+        If `sync_run_id` is given, each table load is separately recorded
+        (etl.sync_table_loads or ops.table_load, per `tracking_backend`).
+        See _run_load_plan for details.
 
         Returns a dict of "schema.table" -> rows loaded.
         """
@@ -961,9 +1005,9 @@ class PostgresLoader:
         `validate_combined_for_full_replace`/
         `validate_project_report_batch_for_platform_load`) before calling
         this. If `sync_run_id` and `provider` are both given, the load is
-        recorded in etl.sync_table_loads (one row covering the whole
-        replace; legacy target only -- `provider` is unused when
-        `enable_sync_tracking` is False).
+        recorded (one row covering the whole replace) in whichever
+        table-load table `tracking_backend` selects -- etl.sync_table_loads
+        for "legacy", ops.table_load for "platform".
 
         Returns the number of rows loaded.
         """
@@ -1141,16 +1185,27 @@ class PostgresLoader:
         start_date: int | None,
         end_date: int | None,
     ) -> str:
-        """Insert a STARTED row into etl.sync_runs and return the new sync_run_id.
+        """Insert a STARTED run row and return the new run id.
 
-        If `enable_sync_tracking` is False (the platform-target default --
-        see `from_platform_settings`), only generates and returns the id;
-        etl.sync_runs does not exist in ge_warehouse so no INSERT is issued.
+        Dispatches on `tracking_backend`: "legacy" inserts into
+        etl.sync_runs (telemetry_warehouse), returning a locally-generated
+        UUID as `sync_run_id`; "platform" inserts into ops.pipeline_run
+        (ge_warehouse) via ge_data_platform.common.audit.start_pipeline_run,
+        returning that row's `pipeline_run_id`. Either way the return value
+        is the id every subsequent start_table_load/finish_table_load/
+        finish_sync_run call for this run must be given -- callers do not
+        need to know which backend is in play.
         """
-        sync_run_id = str(uuid.uuid4())
-        if not self.enable_sync_tracking:
-            return sync_run_id
+        if self.tracking_backend == "platform":
+            return audit.start_pipeline_run(
+                self.engine,
+                source_system=source_system,
+                job_name=job_name,
+                start_date=start_date,
+                end_date=end_date,
+            )
 
+        sync_run_id = str(uuid.uuid4())
         statement = text("""
             INSERT INTO etl.sync_runs (sync_run_id, source_system, job_name, start_date, end_date, status)
             VALUES (:sync_run_id, :source_system, :job_name, :start_date, :end_date, 'STARTED')
@@ -1178,11 +1233,22 @@ class PostgresLoader:
         rows_loaded: int = 0,
         error_message: str | None = None,
     ) -> None:
-        """Update an etl.sync_runs row with its final status and counts.
+        """Update a run row with its final status and counts.
 
-        No-op if `enable_sync_tracking` is False -- see `start_sync_run`.
+        Dispatches on `tracking_backend` exactly like `start_sync_run` --
+        etl.sync_runs for "legacy", ops.pipeline_run for "platform" (via
+        ge_data_platform.common.audit.finish_pipeline_run). `status` is
+        STARTED -> SUCCESS | FAILED | ABANDONED for both backends.
         """
-        if not self.enable_sync_tracking:
+        if self.tracking_backend == "platform":
+            audit.finish_pipeline_run(
+                self.engine,
+                sync_run_id,
+                status=status,
+                rows_fetched=rows_fetched,
+                rows_loaded=rows_loaded,
+                error_message=error_message,
+            )
             return
 
         statement = text("""
@@ -1294,18 +1360,26 @@ class PostgresLoader:
         (jobs anchor their window at "now" immediately before starting the
         run row), which is what EzyTrack gap recovery needs.
 
-        Returns None immediately if `enable_sync_tracking` is False -- see
-        `from_platform_settings`. This is required, not just consistent with
-        the other bookkeeping methods: `etl.sync_runs` does not exist at all
-        in ge_warehouse, so an unguarded query here would either raise
-        (UndefinedTable) or, worse, succeed against the wrong database and
-        let a platform-target run misread telemetry_warehouse's (possibly
-        very stale) success cursor and attempt a large, unintended catch-up.
-        A platform-target EzyTrack run therefore always computes its window
+        Returns None immediately for a "platform" tracking_backend loader --
+        deliberately and unconditionally, even now that ops.pipeline_run is
+        populated for platform-target runs (see
+        ge_data_platform.common.audit). This method is a
+        WATERMARK/CATCH-UP-CURSOR lookup, not a plain audit-history read:
+        ops.pipeline_run records what happened, for observability, but is
+        never itself the reconciliation cursor (that is
+        ops.source_watermark's job -- not populated by any job yet). Only
+        telemetry_warehouse's etl.sync_runs is ever read here, and only for
+        a "legacy" loader; an unguarded query for "platform" would otherwise
+        let a platform-target run infer a catch-up window from
+        ops.pipeline_run's own history (or, before this method existed,
+        from `etl.sync_runs` in the wrong database entirely). A
+        platform-target EzyTrack run therefore always computes its window
         as if no prior successful run exists (first-run/explicit-window
         behavior) -- see docs/sources/ezytrack.md#ge_warehouse-platform-target.
+        This is the one piece of legacy/platform behavior that is
+        deliberately NOT symmetric between the two backends.
         """
-        if not self.enable_sync_tracking:
+        if self.tracking_backend == "platform":
             return None
 
         statement = text("""
@@ -1322,14 +1396,17 @@ class PostgresLoader:
         return dict(row) if row else None
 
     def mark_abandoned_runs(self, threshold_hours: int, now_utc: datetime | None = None) -> list[dict]:
-        """Mark STARTED runs older than `threshold_hours` as ABANDONED.
+        """Mark STARTED etl.sync_runs rows older than `threshold_hours` as ABANDONED.
 
-        Returns the runs that were marked (sync_run_id, source_system,
-        job_name, started_at) so callers can log/alert on each. Callers are
-        responsible for making sure no marked run is still genuinely active.
-        The housekeeping sensor/op in orchestration/monitoring.py maps each
-        candidate to its provider jobs and defers the eligible batch when a
-        corresponding Dagster run is still active.
+        Legacy target only -- unchanged by this migration. Returns the runs
+        that were marked (sync_run_id, source_system, job_name, started_at)
+        so callers can log/alert on each. Callers are responsible for making
+        sure no marked run is still genuinely active. The housekeeping
+        sensor/op in orchestration/monitoring.py maps each candidate to its
+        provider jobs and defers the eligible batch when a corresponding
+        Dagster run is still active. See `mark_abandoned_pipeline_runs` for
+        the platform-target (ops.pipeline_run) equivalent -- that one is not
+        yet wired to any Dagster schedule.
         """
         cutoff = compute_abandoned_cutoff(threshold_hours, now_utc)
 
@@ -1358,6 +1435,29 @@ class PostgresLoader:
                 run["started_at"],
             )
         return marked
+
+    def mark_abandoned_pipeline_runs(self, threshold_hours: int, now_utc: datetime | None = None) -> list[dict]:
+        """Mark STARTED ops.pipeline_run rows older than `threshold_hours` as ABANDONED.
+
+        Platform-target equivalent of `mark_abandoned_runs`, delegating to
+        ge_data_platform.common.audit.mark_abandoned_pipeline_runs with the
+        same cutoff arithmetic (`compute_abandoned_cutoff`). Intended for a
+        "platform" tracking_backend loader -- ops.pipeline_run does not
+        exist in telemetry_warehouse.
+
+        Unlike `mark_abandoned_runs`, this is not called by any Dagster
+        housekeeping job/schedule yet: doing so safely requires the same
+        conservative "defer if a corresponding Dagster run might still be
+        active" check `orchestration/monitoring.py` performs for the legacy
+        job, generalized to platform-target job names. That is a genuine
+        scope expansion (new sensor/job wiring, schedule review) rather than
+        a small addition, so it is intentionally left as a documented next
+        operations task -- see docs/operations/pipeline-operations.md. This
+        method is implemented and tested so that task only has to wire
+        scheduling, not write the cleanup SQL.
+        """
+        cutoff = compute_abandoned_cutoff(threshold_hours, now_utc)
+        return audit.mark_abandoned_pipeline_runs(self.engine, cutoff, threshold_hours=threshold_hours)
 
 
 def compute_abandoned_cutoff(threshold_hours: int, now_utc: datetime | None = None) -> datetime:

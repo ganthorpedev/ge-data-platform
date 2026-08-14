@@ -31,8 +31,10 @@ Other examples:
 
 This orchestrates: fetch (ge_data_platform.sources.trackunit.client) ->
 transform (ge_data_platform.sources.trackunit.transform) -> load
-(ge_data_platform.common.database), and records ONE run in etl.sync_runs /
-etl.sync_table_loads covering every report_date processed in this invocation.
+(ge_data_platform.common.database), and records ONE run -- in
+etl.sync_runs/etl.sync_table_loads (legacy target) or
+ops.pipeline_run/ops.table_load (platform target) -- covering every
+report_date processed in this invocation.
 
 Every date's UTC window is calculated dynamically from the local
 (Africa/Harare, or TRACKUNIT_TIMEZONE) calendar day -- nothing here hardcodes
@@ -47,7 +49,7 @@ calls and 429 backoff/retry are handled inside
 ge_data_platform.sources.trackunit.client (TrackunitClient.get_aemp_series),
 configured via TrackunitSettings -- this job does not sleep or retry itself.
 Any failure that exhausts those retries (or any other non-retryable error)
-stops the whole run immediately and marks etl.sync_runs FAILED -- there is
+stops the whole run immediately and marks the run row FAILED -- there is
 no partial-success mode, even across a multi-date backfill/rolling run.
 """
 
@@ -233,16 +235,17 @@ def run(
     `target="platform"` writes to ge_warehouse raw_trackunit.* /
     stg_trackunit.* instead (see
     docs/migration/legacy-to-platform-migration.md); sync_run/table_load
-    bookkeeping is skipped for platform target (ops.pipeline_run/
-    ops.table_load are not yet wired -- see
-    docs/operations/pipeline-operations.md) and post-load validation is also
-    skipped (its checks are hardcoded to legacy schema names).
+    bookkeeping is recorded in ops.pipeline_run/ops.table_load for platform
+    target (see ge_data_platform.common.audit) rather than
+    etl.sync_runs/etl.sync_table_loads. Post-load validation is still
+    skipped for platform target (its checks are hardcoded to legacy schema
+    names).
 
-    Marks etl.sync_runs SUCCESS only if every report_date's AEMP calls
-    succeeded and loaded cleanly (legacy target only). Any failure (any
-    date, any asset, any metric -- including a 429 that exhausts its
-    retries) marks the whole run FAILED with the error in error_message and
-    re-raises -- there is no partial SUCCESS across a multi-date backfill/
+    Marks the run SUCCESS only if every report_date's AEMP calls succeeded
+    and loaded cleanly. Any failure (any date, any asset, any metric --
+    including a 429 that exhausts its retries) marks the whole run FAILED
+    with the error in error_message and re-raises -- there is no partial
+    SUCCESS across a multi-date backfill/
     rolling run.
     """
     if target not in ("legacy", "platform"):
