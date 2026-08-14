@@ -148,15 +148,28 @@ python -m ge_data_platform.sources.evolution.project_reports --target platform
   (`extract_all`, and `build_raw`/`add_business_unit_classification`, which
   together produce byte-identical output to legacy's single-step
   `build_combined`);
-- skips `etl.sync_runs`/`etl.sync_table_loads` bookkeeping (`ops.pipeline_run`/
-  `ops.table_load` are not yet wired) and skips post-load validation (hardcoded
-  to legacy schema names) -- same precedent as Trackunit/Sendem/EzyTrack;
+- records the run and each table load (`raw_evolution.project_report`,
+  `stg_evolution.project_report`) in `ops.pipeline_run`/`ops.table_load`
+  instead of `etl.sync_runs`/`etl.sync_table_loads` (same `start_sync_run`/
+  `finish_sync_run` call sites in `project_reports.py`;
+  `PostgresLoader.tracking_backend` selects the destination -- see
+  `ge_data_platform.common.audit`) and still skips post-load validation
+  (hardcoded to legacy schema names) -- same precedent as
+  Trackunit/Sendem/EzyTrack;
 - uses `validate_project_report_batch_for_platform_load` instead of legacy's
   `validate_combined_for_full_replace` (see "Known constraints" above for
-  why they differ).
+  why they differ). The Evolution SQL Server itself is only ever read, never
+  written, regardless of `--target` -- audit tracking is entirely a
+  `ge_warehouse`/PostgreSQL-side concern.
 
 No Dagster job or schedule passes `--target platform`; it is exercised only
-by manual invocation today. See
+by manual invocation today. A real run (both GE and TLS sources) was used to
+prove `ops.pipeline_run`/`ops.table_load` population during this
+audit-wiring change -- 1 `ops.pipeline_run` row
+(`source_system=evolution_project_reports`, `status=SUCCESS`) and 2
+`ops.table_load` rows (one per destination table), matching the extracted
+row count exactly (full-replace, so `rows_input == rows_loaded` for both).
+See
 `docs/migration/legacy-to-platform-migration.md#evolution-migration-completed`
 for the first-load and reconciliation results, and
 `scripts/run_evolution_first_load.py`/`scripts/validate_evolution_migration.py`

@@ -115,7 +115,8 @@ alongside every layer, recording what ran, when, and with what outcome. See
 | `core` (everything else) | PLANNED |
 | `mart_<domain>` schemas | IMPLEMENTED (empty) |
 | `reporting` schema | PLANNED (does not exist) |
-| `ops.pipeline_run` / `ops.table_load` / `ops.schema_version` | IMPLEMENTED (structure only; not yet written to by any job) |
+| `ops.pipeline_run` / `ops.table_load` | IMPLEMENTED and WIRED -- written by every `--target platform` run of Trackunit, Sendem, EzyTrack, Evolution Project Reports (see `ge_data_platform.common.audit`) |
+| `ops.schema_version` | IMPLEMENTED and WIRED -- every applied migration registers itself |
 | `ops.source_watermark` / `ops.data_quality_result` / `ops.alert_event` | IMPLEMENTED (structure only; not wired into any job) |
 | Actual source ingestion into any of the above | NOT STARTED -- every provider job today still writes to legacy `telemetry_warehouse` |
 

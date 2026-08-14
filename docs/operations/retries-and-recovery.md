@@ -111,6 +111,17 @@ original identity/timestamps, get a cleanup note appended to
 it never deletes data or retries a provider; diagnose the original failure
 and use the recovery commands below.
 
+Legacy (`etl.sync_runs`) only -- this is what the scheduled Dagster job
+above actually cleans. The platform equivalent
+(`PostgresLoader.mark_abandoned_pipeline_runs` /
+`ge_data_platform.common.audit.mark_abandoned_pipeline_runs`, for
+`ops.pipeline_run`) exists and is tested but is **not** on any schedule yet
+-- see `docs/operations/pipeline-operations.md#stale-run-abandoned-cleanup`.
+Until it is, a stuck `STARTED` `ops.pipeline_run` row from a `--target
+platform` run must be reconciled by hand (confirm the run is genuinely dead,
+then run `PostgresLoader.from_platform_settings(...).mark_abandoned_pipeline_runs(threshold_hours)`
+or update the row directly).
+
 ## Subprocess timeout
 
 Covered in `docs/operations/pipeline-operations.md#subprocess-monitoring`.
@@ -121,8 +132,13 @@ If provider work fails and the database update to mark it `FAILED` *also*
 fails (e.g. Postgres itself is unreachable), the bookkeeping error is logged
 but the **original** exception is what propagates and fails the job --
 `finish_sync_run_failed_safe` swallows the bookkeeping failure specifically
-so it never masks the real root cause. The row is left `STARTED`, which the
-stale-run cleanup above will eventually catch.
+so it never masks the real root cause. This holds for both targets:
+`finish_sync_run_failed_safe` calls `loader.finish_sync_run`, which
+dispatches to `etl.sync_runs` or `ops.pipeline_run` per
+`loader.tracking_backend` -- the failure-safe wrapper doesn't know or care
+which. The row is left `STARTED`, which the stale-run cleanup above will
+eventually catch for legacy (scheduled) or `mark_abandoned_pipeline_runs`
+for platform (manual, for now -- see above).
 
 ## Manual provider recovery
 

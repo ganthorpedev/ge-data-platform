@@ -74,17 +74,21 @@ during the pre-live-test inventory -- last `SUCCESS` 2026-07-21, every
 catch-up/reconciliation attempt since `FAILED` with `GraphQL cost rate limit
 exceeded`. `ge_warehouse` has no `etl` schema at all, so
 `PostgresLoader.get_last_successful_run` (which `ge_data_platform.sources.ezytrack.sync`
-uses to compute its catch-up window) now returns `None` immediately whenever
-`enable_sync_tracking` is `False` -- always true for a platform-settings
-loader -- **before** issuing any query. Without this guard, a platform-target
+uses to compute its catch-up window) now returns `None` immediately for a
+platform-settings loader -- **before** issuing any query (originally gated
+on `enable_sync_tracking is False`; that flag was later generalized to
+`tracking_backend == "platform"` when `ops.pipeline_run`/`ops.table_load`
+were wired -- see `docs/operations/pipeline-operations.md#ops-metadata-wiring-status`
+-- the guard itself is unchanged). Without this guard, a platform-target
 run would either crash (querying a table that doesn't exist) or, worse,
 misread legacy's 3-week-stale cursor and attempt an unintended
 `max_catchup_hours`-capped (168h) catch-up on its very first invocation.
 Verified directly: `PostgresLoader.from_platform_settings(...).get_last_successful_run("ezytrack")`
 returns `None` against an engine stub that raises if `connect()` is ever
-called. This is now a permanent regression test
-(`tests/ezytrack/test_ezytrack_platform_target.py`), not just a one-time
-manual check.
+called, even after `ops.pipeline_run` was wired and genuinely holds
+`SUCCESS` rows for platform-target EzyTrack runs. This is a permanent
+regression test (`tests/ezytrack/test_ezytrack_platform_target.py`,
+`tests/platform/test_ops_audit.py`), not just a one-time manual check.
 
 **Discovered during the Evolution `raw_evolution`/`stg_evolution` migration**
 (see `docs/migration/legacy-to-platform-migration.md#evolution-migration-completed`):

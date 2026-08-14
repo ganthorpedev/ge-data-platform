@@ -192,13 +192,22 @@ the full cron table (`trackunit_daily_refresh`, `trackunit_intraday_refresh`,
   database differ, via `PostgresLoader.from_platform_settings` and the
   `target=` parameter on `load_trackunit_tables`/
   `load_trackunit_location_enrichment` in `common/database.py`);
-- skips `etl.sync_runs`/`etl.sync_table_loads` bookkeeping (`ops.pipeline_run`/
-  `ops.table_load` are not yet wired -- see
-  `docs/operations/pipeline-operations.md`);
+- records the run and each table load in `ops.pipeline_run`/`ops.table_load`
+  instead of `etl.sync_runs`/`etl.sync_table_loads` (same
+  `start_sync_run`/`finish_sync_run`/`start_table_load`/`finish_table_load`
+  call sites in `daily_activity.py`/`location.py` -- `PostgresLoader.
+  tracking_backend` selects the destination; see
+  `docs/operations/pipeline-operations.md#ops-metadata-wiring-status` and
+  `ge_data_platform.common.audit`);
 - skips post-load validation (its checks are hardcoded to legacy schema
   names).
 
 No Dagster job or schedule passes `--target platform`; it is exercised only
-by manual invocation today. See
+by manual invocation today. A real `--limit 1` run (asset 3846,
+`report_date=2026-07-05`) was used to prove `ops.pipeline_run`/
+`ops.table_load` population during this audit-wiring change -- 1
+`ops.pipeline_run` row (`source_system=trackunit`,
+`job_name=trackunit_daily_activity_sync`, `status=SUCCESS`) and 6
+`ops.table_load` rows, all referencing that run. See
 `docs/migration/legacy-to-platform-migration.md#trackunit-migration-completed`
 for the historical backfill and a real fresh-ingestion test run against it.

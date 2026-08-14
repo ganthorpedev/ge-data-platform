@@ -107,14 +107,22 @@ python -m ge_data_platform.sources.sendem.sync --target platform --lookback-days
   schema/table names and database differ, via
   `PostgresLoader.from_platform_settings` and the `target=` parameter on
   `load_sendem_tables` in `common/database.py`);
-- skips `etl.sync_runs`/`etl.sync_table_loads` bookkeeping (`ops.pipeline_run`/
-  `ops.table_load` are not yet wired -- see
-  `docs/operations/pipeline-operations.md`);
+- records the run and each table load in `ops.pipeline_run`/`ops.table_load`
+  instead of `etl.sync_runs`/`etl.sync_table_loads` (same call sites in
+  `sync.py`; `PostgresLoader.tracking_backend` selects the destination --
+  see `docs/operations/pipeline-operations.md#ops-metadata-wiring-status`
+  and `ge_data_platform.common.audit`). An empty-payload day still gets a
+  `SUCCESS` `ops.pipeline_run` row with `rows_loaded=0` where genuinely
+  applicable -- an empty result is never miscoded as a failure;
 - skips post-load validation (its checks are hardcoded to legacy schema
   names).
 
 No Dagster job or schedule passes `--target platform`; it is exercised only
-by manual invocation today. `stg_sendem.trip_daily`/`stg_sendem.event_daily`
+by manual invocation today. A real `--lookback-days 1` run was used to prove
+`ops.pipeline_run`/`ops.table_load` population during this audit-wiring
+change -- 1 `ops.pipeline_run` row (`source_system=sendem`,
+`status=SUCCESS`) and 10 `ops.table_load` rows, all referencing that run.
+`stg_sendem.trip_daily`/`stg_sendem.event_daily`
 additionally carry historical rows folded in from legacy
 `clean.sendem_fact_trips_daily`/`_events_daily` (2026-01-01 onward) by
 `scripts/backfill_sendem_historical.py` -- a live platform-target sync

@@ -1,9 +1,13 @@
 # Pipeline operations
 
-**Status: IMPLEMENTED.** This document describes real, running behavior
-against `telemetry_warehouse` (the only database any job actually writes to
-today). `ge_warehouse`'s `ops` schema exists structurally but nothing here
-is wired to write to it yet -- see "ops metadata wiring status" below.
+**Status: IMPLEMENTED.** This document describes real, running behavior.
+`telemetry_warehouse` remains the only database any *scheduled* Dagster job
+writes to; `ge_warehouse` is written to only by manual `--target platform`
+invocations of the four migrated sources (Trackunit, Sendem, EzyTrack,
+Evolution Project Reports) -- no Dagster schedule targets it. Both targets'
+run/table-load bookkeeping (`ops.pipeline_run`/`ops.table_load` for
+platform, `etl.sync_runs`/`etl.sync_table_loads` for legacy) is wired -- see
+"ops metadata wiring status" below.
 
 For retry/backoff mechanics and manual recovery commands, see
 `docs/operations/retries-and-recovery.md`. For alerting and freshness, see
@@ -144,15 +148,62 @@ concurrency:
 
 ## `ops` metadata wiring status
 
-**Structure exists; nothing writes to it yet.** Every provider job today
-still records its run in the legacy `etl.sync_runs`/`etl.sync_table_loads`
-(via `PostgresLoader.start_sync_run`/`finish_sync_run`/`_run_load_plan`
-against `telemetry_warehouse`). The platform successor,
-`ops.pipeline_run`/`ops.table_load`, exists in `ge_warehouse`
-(`sql/migrations/002_create_ops_metadata.sql`) but no job has been
-repointed at it -- that's ingestion-migration work, explicitly out of scope
-until sources are ported (see
-`docs/migration/legacy-to-platform-migration.md`).
+**`ops.pipeline_run`/`ops.table_load` are wired and operational for every
+migrated source's platform target.** `--target legacy` is unchanged: every
+provider job still records its run in `etl.sync_runs`/`etl.sync_table_loads`
+against `telemetry_warehouse`, via `PostgresLoader.start_sync_run`/
+`finish_sync_run`/`_run_load_plan`. `--target platform` now records the
+same lifecycle in `ge_warehouse`'s `ops.pipeline_run`/`ops.table_load`
+instead, via the same call sites -- `PostgresLoader.tracking_backend`
+("legacy" or "platform", set by how the loader was constructed --
+`PostgresLoader(settings)` vs `PostgresLoader.from_platform_settings()`)
+selects the destination underneath; no source's `sync.py`/entry-point logic
+had to change. The actual INSERT/UPDATE statements for the platform side
+live in one place, `ge_data_platform.common.audit`, reused by all four
+sources (Trackunit, Sendem, EzyTrack, Evolution Project Reports) --
+see that module's docstring for the full column-by-column semantics, and
+`tests/platform/test_ops_audit.py` for the test coverage (lifecycle,
+zero-row success, failure-path error preservation, legacy/platform SQL
+isolation, table-load FK integrity).
+
+### Pipeline audit history vs. watermark/reconciliation state
+
+`ops.pipeline_run` records what happened -- for observability and
+troubleshooting. It is deliberately **never** read back as a catch-up or
+reconciliation cursor. `PostgresLoader.get_last_successful_run` -- the one
+method EzyTrack's gap-recovery window math depends on -- still returns
+`None` unconditionally for a `tracking_backend="platform"` loader, exactly
+as it did before this table had any real rows in it. That is intentional
+and load-bearing: `ops.source_watermark` (structure exists, not populated by
+any job yet) is reserved for an explicit watermark/cursor, specifically so
+audit history and reconciliation state never get conflated the way legacy
+`etl.sync_runs` conflated them (its `started_at` is both a log timestamp
+and, informally, EzyTrack's catch-up cursor). A platform-target EzyTrack run
+therefore always computes its fetch window as a first-run/explicit-window
+fetch, never a catch-up window inferred from either the legacy cursor or
+`ops.pipeline_run`'s own success history -- verified live during this
+migration: two consecutive `--target platform` EzyTrack runs both logged
+`Sync window (first-run, UTC): ...` despite the first run leaving a real
+`SUCCESS` row in `ops.pipeline_run`. See `docs/sources/ezytrack.md#ge_warehouse-platform-target`.
+
+### Stale-run ABANDONED cleanup
+
+Legacy: `orchestration/monitoring.py`'s `stale_started_run_cleanup` Dagster
+job/schedule marks stale `STARTED` `etl.sync_runs` rows `ABANDONED`, after
+conservatively checking no corresponding Dagster run is still active
+(`PostgresLoader.mark_abandoned_runs`). Platform: the same SQL-level
+capability exists for `ops.pipeline_run` --
+`PostgresLoader.mark_abandoned_pipeline_runs` /
+`ge_data_platform.common.audit.mark_abandoned_pipeline_runs`, tested in
+`tests/platform/test_ops_audit.py` -- but it is **not** wired to any
+Dagster job or schedule yet. Doing so safely requires generalizing the
+"defer if a corresponding Dagster run might still be active" check to
+platform-target job names, which is a genuine scope expansion (new
+sensor/job, schedule review), not a small addition; it is the next
+operations task for `ops.pipeline_run`, deliberately not built ahead of
+being needed. Until then, a platform-target run that fails before its
+`FAILED` bookkeeping write completes stays `STARTED` and must be reconciled
+manually (see `docs/operations/retries-and-recovery.md`).
 
 `ops.source_watermark`, `ops.data_quality_result`, and `ops.alert_event` are
 new, additive tables with no legacy equivalent and no application code

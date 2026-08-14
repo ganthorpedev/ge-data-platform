@@ -6,11 +6,14 @@
 python -m pytest
 ```
 
-139 tests today, organized by source under `tests/`:
+210 tests today, organized by source under `tests/`:
 `tests/trackunit/`, `tests/sendem/`, `tests/ezytrack/`, `tests/evolution/`,
-`tests/orchestration/`, `tests/platform/` (the newest: `ge_warehouse`
-settings, migration discovery, schema-naming statics -- see
-`docs/development/migrations.md`).
+`tests/orchestration/`, `tests/platform/` (`ge_warehouse` settings,
+migration discovery, schema-naming statics -- see
+`docs/development/migrations.md` -- plus `test_ops_audit.py`: the shared
+`ops.pipeline_run`/`ops.table_load` audit mechanism in
+`ge_data_platform.common.audit`, and its dispatch/isolation from legacy
+`etl.sync_runs`/`etl.sync_table_loads` in `PostgresLoader`).
 
 These mock provider HTTP/SQL calls and `time.sleep` -- **they never call a
 live API or a live database**, with one deliberate exception:
@@ -95,6 +98,15 @@ run that provider's manual validation pack. A real 429 cannot be forced
 safely for a live test; the mocked unit test proves the timing branch, and
 a naturally occurring production 429 should log metric/PIN/attempt/wait
 without creating duplicate staging rows.
+
+The same commands with `--target platform` added (e.g. `python -m
+ge_data_platform.sources.sendem.sync --target platform --lookback-days 1`)
+exercise the `ge_warehouse` platform target instead -- same external-API
+calls, but the run/table-load bookkeeping lands in
+`ops.pipeline_run`/`ops.table_load` rather than
+`etl.sync_runs`/`etl.sync_table_loads`. After a platform-target smoke test,
+confirm the `ops.pipeline_run` row closed `SUCCESS` and inspect
+`ops.table_load` the same way.
 
 ## Side-by-side migration validation philosophy
 

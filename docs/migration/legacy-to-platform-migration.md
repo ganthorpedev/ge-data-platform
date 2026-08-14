@@ -171,10 +171,15 @@ Full column-level detail for every current `reporting.*` object:
 
 | Current | Target | Method | Notes |
 |---|---|---|---|
-| `etl.sync_runs` | `ops.pipeline_run` | structural-only (this phase) | 55 rows; `sync_run_id` -> `pipeline_run_id` (table itself renamed) |
-| `etl.sync_table_loads` | `ops.table_load` | structural-only (this phase) | 299 rows; `id` -> `table_load_id`, `sync_run_id` -> `pipeline_run_id`, `provider` -> `source_system` (deliberate consistency fix) |
+| `etl.sync_runs` | `ops.pipeline_run` | structural, then wired | 55 rows; `sync_run_id` -> `pipeline_run_id` (table itself renamed) |
+| `etl.sync_table_loads` | `ops.table_load` | structural, then wired | 299 rows; `id` -> `table_load_id`, `sync_run_id` -> `pipeline_run_id`, `provider` -> `source_system` (deliberate consistency fix) |
 
-Full column mapping: `docs/architecture/architecture-decisions.md#adr-005`.
+Structural since this phase (schemas + columns created, unpopulated); wired
+in a later change so every `--target platform` run of the four migrated
+sources writes real rows -- see
+`docs/operations/pipeline-operations.md#ops-metadata-wiring-status` and
+`ge_data_platform.common.audit`. Full column mapping:
+`docs/architecture/architecture-decisions.md#adr-005`.
 
 ### Roles
 
@@ -529,6 +534,15 @@ uses by design. Verified directly (an engine stub that raises if `connect()`
 is ever called still returns `None` cleanly) and covered by a permanent
 regression test. See `docs/operations/data-quality.md` for the full
 narrative.
+
+**Update (`ops` audit wiring):** `enable_sync_tracking: bool` was later
+generalized to `tracking_backend: "legacy" | "platform"` when
+`ops.pipeline_run`/`ops.table_load` were wired up (see
+`docs/operations/pipeline-operations.md#ops-metadata-wiring-status`) --
+`get_last_successful_run` still returns `None` immediately for
+`tracking_backend == "platform"`, unconditionally, even though
+`ops.pipeline_run` now genuinely holds `SUCCESS` rows. The guarantee this
+section describes is unchanged; only the flag's name is.
 
 ### Historical backfill and reconciliation results
 

@@ -132,15 +132,17 @@ incremental key. See `docs/sources/evolution.md#snapshot-semantics`.
 | Table | Wired into a running job? | Purpose |
 |---|---|---|
 | `ops.schema_version` | Yes -- every `sql/migrations/*.sql` file registers itself here on apply | Tracks which `ge_warehouse` migrations have run |
-| `ops.pipeline_run` | No | Platform successor to legacy `etl.sync_runs` |
-| `ops.table_load` | No | Platform successor to legacy `etl.sync_table_loads` |
-| `ops.source_watermark` | No | New: intended to formalize the last-successful-cursor lookup that legacy `PostgresLoader.get_last_successful_run()` currently derives ad hoc |
+| `ops.pipeline_run` | Yes -- every `--target platform` run of Trackunit, Sendem, EzyTrack, or Evolution Project Reports, via `PostgresLoader`/`ge_data_platform.common.audit` | Platform successor to legacy `etl.sync_runs`. Audit history only -- never read back as a catch-up cursor, see below |
+| `ops.table_load` | Yes -- same four sources, one row per raw/staging table touched per run | Platform successor to legacy `etl.sync_table_loads` |
+| `ops.source_watermark` | No | New: intended to formalize the last-successful-cursor lookup that legacy `PostgresLoader.get_last_successful_run()` currently derives ad hoc. `ops.pipeline_run` is deliberately NOT used for this even though it now holds real history -- see `docs/operations/pipeline-operations.md#pipeline-audit-history-vs-watermarkreconciliation-state` |
 | `ops.data_quality_result` | No | New: intended to persist the bounded post-load validation results that legacy code currently only logs |
 | `ops.alert_event` | No | New: intended to persist the webhook alerts that legacy `orchestration/alerts.py` currently only fires and forgets |
 
 "Wired into a running job" means application code (a source sync, an
-orchestration op) writes to it. None of the last five are written to by
-anything yet -- see `docs/architecture/platform-overview.md`'s status table
+orchestration op) writes to it. `ops.pipeline_run`/`ops.table_load` were
+wired for all four migrated sources' platform target in the same change
+that added `ge_data_platform.common.audit`; the last three tables remain
+unwritten -- see `docs/architecture/platform-overview.md`'s status table
 and `docs/operations/pipeline-operations.md`.
 
 ### PostgreSQL `public` schema

@@ -146,27 +146,39 @@ python -m ge_data_platform.sources.ezytrack.sync --target platform --lookback-ho
   the destination schema/table names and database differ, via
   `PostgresLoader.from_platform_settings` and the `target=` parameter on
   `load_ezytrack_tables` in `common/database.py`);
-- skips `etl.sync_runs`/`etl.sync_table_loads` bookkeeping (`ops.pipeline_run`/
-  `ops.table_load` are not yet wired);
+- records the run and each table load in `ops.pipeline_run`/`ops.table_load`
+  instead of `etl.sync_runs`/`etl.sync_table_loads` (same
+  `start_sync_run`/`finish_sync_run`/`start_table_load`/`finish_table_load`
+  call sites in `sync.py`; `PostgresLoader.tracking_backend` selects the
+  destination -- see `ge_data_platform.common.audit`);
 - skips post-load validation (its checks are hardcoded to legacy schema
   names).
 
-**Catch-up safety (the one shared-code change this migration required):**
-`ge_warehouse` has no `etl` schema at all, so a platform-target run must
-never read legacy `telemetry_warehouse.etl.sync_runs` for its catch-up
-cursor -- especially since that cursor can go stale (confirmed during this
-migration: legacy's last successful EzyTrack sync was 2026-07-21, with
-repeated `GraphQL cost rate limit exceeded` failures on every catch-up/
-reconciliation attempt since). `PostgresLoader.get_last_successful_run` now
-returns `None` immediately whenever `enable_sync_tracking` is `False`
-(always true for a platform-settings loader, per `from_platform_settings`)
--- **before** issuing any query -- so a platform-target run always computes
-its window as first-run/explicit-window, identical in shape to how
-`--reconcile` already ignores the cursor by design. It never attempts a
-`max_catchup_hours`-capped historical catch-up inferred from legacy state.
+**Catch-up safety (the one shared-code behavior this migration required, and
+had to preserve when `ops.pipeline_run` was wired):** a platform-target run
+must never read legacy `telemetry_warehouse.etl.sync_runs` for its catch-up
+cursor -- especially since that cursor can go stale (confirmed during the
+original migration: legacy's last successful EzyTrack sync was 2026-07-21,
+with repeated `GraphQL cost rate limit exceeded` failures on every catch-up/
+reconciliation attempt since). Now that `ops.pipeline_run` is wired and
+genuinely holds `SUCCESS` rows for platform-target EzyTrack runs, the same
+guarantee had to be re-verified against a *second* possible source of a
+stale/unintended catch-up: `ops.pipeline_run`'s own history.
+`PostgresLoader.get_last_successful_run` still returns `None` immediately
+whenever `tracking_backend == "platform"` -- **before** issuing any
+query, so it is unaffected by what `ops.pipeline_run` actually contains --
+so a platform-target run always computes its window as
+first-run/explicit-window, identical in shape to how `--reconcile` already
+ignores the cursor by design. It never attempts a `max_catchup_hours`-capped
+historical catch-up inferred from either legacy state or `ops.pipeline_run`.
 `--lookback-hours` lets an operator supply an explicit small window (e.g. 1
 hour) for a manual test, overriding `TELEMATICS_LOOKBACK_HOURS` for that one
-run only.
+run only. Live-verified during the `ops` audit-wiring change: two
+consecutive `--target platform --lookback-hours 1` runs both logged `Sync
+window (first-run, UTC): ...`, even though the first run had already left a
+real `SUCCESS` row in `ops.pipeline_run` before the second one started --
+see `tests/platform/test_ops_audit.py::test_get_last_successful_run_returns_none_for_platform_even_with_real_success_history`
+for the equivalent automated proof.
 
 No Dagster job or schedule passes `--target platform`; it is exercised only
 by manual invocation today. See
