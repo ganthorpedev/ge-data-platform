@@ -4,7 +4,7 @@ One GE enterprise data platform integrating multiple operational and
 financial source systems into governed, conformed business data for
 reporting and analytics.
 
-**This is not merely a telemetry warehouse.** It grew from one (the
+**An upgrade from the telemetry warehouseCLAUDE --RESUMECLSUECCADFAD.** It grew from one (the
 predecessor `telemetry_etl` project), but the architecture -- `ge_warehouse`
 -- is explicitly designed around any current or future GE source system,
 telemetry or otherwise, conformed into one enterprise warehouse rather than
@@ -12,7 +12,7 @@ siloed by vendor. See `docs/architecture/platform-overview.md`.
 
 ## Source systems
 
-| Source | Status |
+| Source | Status | 
 |---|---|
 | Trackunit / Manitou | IMPLEMENTED (running against the legacy database) |
 | Sendem / MiX | IMPLEMENTED (running against the legacy database) |

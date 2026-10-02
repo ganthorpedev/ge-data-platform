@@ -73,6 +73,10 @@ def test_load_sendem_tables_legacy_target_uses_raw_and_staging_schemas(monkeypat
         ("staging", "sendem_dim_event_types"),
         ("staging", "sendem_fact_trips_daily"),
         ("staging", "sendem_fact_events_daily"),
+        # The driver-grain (engine time) feed, last: after every
+        # long-established table, raw then staging.
+        ("raw", "sendem_trips_assetspeople_daily"),
+        ("staging", "sendem_fact_trips_assetspeople_daily"),
     ]
 
 
@@ -99,6 +103,8 @@ def test_load_sendem_tables_platform_target_uses_raw_sendem_and_stg_sendem_schem
         ("stg_sendem", "event_type"),
         ("stg_sendem", "trip_daily"),
         ("stg_sendem", "event_daily"),
+        ("raw_sendem", "trip_driver_daily"),
+        ("stg_sendem", "trip_driver_daily"),
     ]
 
 
@@ -122,7 +128,7 @@ def test_load_sendem_tables_platform_target_survives_empty_payload(monkeypatch: 
 
     loader.load_sendem_tables(_empty_sendem_dataframes(), target="platform")
 
-    assert len(captured["plan"]) == 10
+    assert len(captured["plan"]) == 12
     assert all(df.empty for _schema, _table, df, _cc in captured["plan"])
 
 

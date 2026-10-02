@@ -28,6 +28,9 @@ def test_discover_migrations_finds_real_baseline_files_in_order() -> None:
         "010_create_stg_ezytrack.sql",
         "011_create_raw_evolution.sql",
         "012_create_stg_evolution.sql",
+        "013_create_core_asset_model.sql",
+        "014_add_asset_type_and_asset_attributes.sql",
+        "015_create_sendem_trip_driver_daily.sql",
     ]
 
 

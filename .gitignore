@@ -40,3 +40,7 @@ scripts/_evolution_first_load_evidence.json
 .idea/
 .DS_Store
 Thumbs.db
+
+
+# Local csv and data files
+data/local

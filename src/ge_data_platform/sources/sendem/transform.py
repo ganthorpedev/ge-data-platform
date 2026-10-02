@@ -28,6 +28,38 @@ FACT_TRIPS_COLUMNS = [
     "TotalEnergyUsedKwh",
 ]
 
+# Driver-grain trips (GET /api/aggregates/trips/assetspeople): the same
+# asset/site/day totals as FACT_TRIPS_COLUMNS, per DriverId, plus the engine
+# and driving time fields only this endpoint returns. The grain is kept
+# exactly as the API states it -- never summed here. Rolling several drivers
+# up to one machine-day is the reporting view's job
+# (reporting.vw_sendem_asset_daily_activity), so the aggregation rule lives
+# in one place and the driver attribution survives.
+FACT_TRIPS_ASSETS_PEOPLE_COLUMNS = [
+    "date",
+    "DateKey",
+    "GroupId",
+    "SiteId",
+    "SiteName",
+    "AssetId",
+    "FleetNumber",
+    "RegistrationNumber",
+    "Description",
+    "Make",
+    "Model",
+    "AssetType",
+    "DriverId",
+    "TotalAssetDrivingTimeSeconds",
+    "TotalDriverDrivingTimeSeconds",
+    "TotalEngineSecond",
+    "TotalIdleTimeSeconds",
+    "TotalTripCount",
+    "TotalTripDistanceKilometres",
+    "TotalTripDuration",
+    "TotalFuelUsedLitres",
+    "TotalEnergyUsedKwh",
+]
+
 FACT_EVENTS_COLUMNS = [
     "date",
     "DateKey",
@@ -87,6 +119,22 @@ TRIP_COLUMNS = [
     "AssetId",
     "TotalTripCount",
     "TotalTripDistanceKilometres",
+    "TotalFuelUsedLitres",
+    "TotalEnergyUsedKwh",
+]
+TRIP_ASSETS_PEOPLE_COLUMNS = [
+    "DateKey",
+    "GroupId",
+    "SiteId",
+    "AssetId",
+    "DriverId",
+    "TotalAssetDrivingTimeSeconds",
+    "TotalDriverDrivingTimeSeconds",
+    "TotalEngineSecond",
+    "TotalIdleTimeSeconds",
+    "TotalTripCount",
+    "TotalTripDistanceKilometres",
+    "TotalTripDuration",
     "TotalFuelUsedLitres",
     "TotalEnergyUsedKwh",
 ]
@@ -178,6 +226,27 @@ def build_fact_trips(trips_enriched_df: pd.DataFrame) -> pd.DataFrame:
     return trips_enriched_df.reindex(columns=FACT_TRIPS_COLUMNS).copy()
 
 
+def enrich_trips_assets_people(
+    trips_people_df: pd.DataFrame,
+    assets_df: pd.DataFrame,
+    sites_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Left-join driver-grain trips onto assets and sites, and add a `date` column.
+
+    The same enrichment as `enrich_trips`; the driver rows are not touched
+    beyond that. A null `TotalEngineSecond` stays null -- unknown engine
+    time is never turned into nought here or anywhere downstream.
+    """
+    enriched = _left_join_dimension(trips_people_df, assets_df, "AssetId", "_asset")
+    enriched = _left_join_dimension(enriched, sites_df, "SiteId", "_site")
+    return add_date_column(enriched)
+
+
+def build_fact_trips_assets_people(trips_people_enriched_df: pd.DataFrame) -> pd.DataFrame:
+    """Return the driver-grain fact schema, filling absent enrichment fields with nulls."""
+    return trips_people_enriched_df.reindex(columns=FACT_TRIPS_ASSETS_PEOPLE_COLUMNS).copy()
+
+
 def enrich_events(
     events_df: pd.DataFrame,
     assets_df: pd.DataFrame,
@@ -238,11 +307,16 @@ def build_dim_event_types(event_desc_df: pd.DataFrame, events_df: pd.DataFrame) 
 def build_all(raw: dict[str, list]) -> dict[str, pd.DataFrame]:
     """Build every Sendem DataFrame from raw API payloads.
 
-    `raw` is expected to have assets, sites, event_descriptions, trips, and
-    events. Legacy people/organisations values are still accepted in the
-    returned diagnostic frames, but the production job no longer fetches
-    those unused endpoints because neither the transforms nor load plan uses
-    them.
+    `raw` is expected to have assets, sites, event_descriptions, trips,
+    trips_assets_people, and events. Legacy people/organisations values are
+    still accepted in the returned diagnostic frames, but the production job
+    no longer fetches those unused endpoints because neither the transforms
+    nor load plan uses them.
+
+    `trips_assets_people` (GET /api/aggregates/trips/assetspeople) is the
+    driver-grain trip feed carrying engine time; it is kept at its own grain
+    beside, never instead of, the asset-level `trips` feed. A payload
+    without the key loads as an empty, correctly-shaped frame.
     """
     assets_df = to_dataframe(raw.get("assets", []), ASSET_COLUMNS)
     sites_df = to_dataframe(raw.get("sites", []), SITE_COLUMNS)
@@ -250,12 +324,17 @@ def build_all(raw: dict[str, list]) -> dict[str, pd.DataFrame]:
     organisations_df = to_dataframe(raw.get("organisations", []))
     event_desc_df = to_dataframe(raw.get("event_descriptions", []), EVENT_DESCRIPTION_COLUMNS)
     trips_df = add_date_column(to_dataframe(raw.get("trips", []), TRIP_COLUMNS))
+    trips_people_df = add_date_column(
+        to_dataframe(raw.get("trips_assets_people", []), TRIP_ASSETS_PEOPLE_COLUMNS)
+    )
     events_df = add_date_column(to_dataframe(raw.get("events", []), EVENT_COLUMNS))
 
     trips_enriched_df = enrich_trips(trips_df, assets_df, sites_df)
+    trips_people_enriched_df = enrich_trips_assets_people(trips_people_df, assets_df, sites_df)
     events_enriched_df = enrich_events(events_df, assets_df, sites_df, event_desc_df)
 
     fact_trips = build_fact_trips(trips_enriched_df)
+    fact_trips_assets_people = build_fact_trips_assets_people(trips_people_enriched_df)
     fact_events = build_fact_events(events_enriched_df)
 
     dim_event_types_df = build_dim_event_types(event_desc_df, events_df)
@@ -268,9 +347,12 @@ def build_all(raw: dict[str, list]) -> dict[str, pd.DataFrame]:
         "event_desc_df": event_desc_df,
         "dim_event_types_df": dim_event_types_df,
         "trips_df": trips_df,
+        "trips_people_df": trips_people_df,
         "events_df": events_df,
         "trips_enriched_df": trips_enriched_df,
+        "trips_people_enriched_df": trips_people_enriched_df,
         "events_enriched_df": events_enriched_df,
         "fact_trips": fact_trips,
+        "fact_trips_assets_people": fact_trips_assets_people,
         "fact_events": fact_events,
     }

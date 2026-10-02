@@ -53,7 +53,11 @@ WITH expected_keys(table_schema, table_name, expected_columns) AS (
         ('staging', 'sendem_dim_sites', ARRAY['site_id']),
         ('staging', 'sendem_dim_event_types', ARRAY['event_type_id']),
         ('staging', 'sendem_fact_trips_daily', ARRAY['date_key', 'group_id', 'site_id', 'asset_id']),
-        ('staging', 'sendem_fact_events_daily', ARRAY['date_key', 'group_id', 'site_id', 'asset_id', 'event_type_id'])
+        ('staging', 'sendem_fact_events_daily', ARRAY['date_key', 'group_id', 'site_id', 'asset_id', 'event_type_id']),
+        -- Driver-grain trips (030): the key carries driver_id, so a re-run
+        -- can never duplicate a driver row behind the asset-day roll-up.
+        ('raw', 'sendem_trips_assetspeople_daily', ARRAY['date_key', 'group_id', 'site_id', 'asset_id', 'driver_id']),
+        ('staging', 'sendem_fact_trips_assetspeople_daily', ARRAY['date_key', 'group_id', 'site_id', 'asset_id', 'driver_id'])
 ),
 actual_keys AS (
     SELECT

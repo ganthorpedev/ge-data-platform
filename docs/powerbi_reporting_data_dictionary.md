@@ -283,9 +283,32 @@ Trackunit has no fleet-number field distinct from its asset name; Sendem has
 no telematics device serial; EzyTrack has no serial_number/device_serial/fleet_no
 at all in this codebase's staging tables.
 
+### `reporting.vw_sendem_asset_daily_activity`
+
+- **Added**: `sql/legacy/telemetry_migrations/030_create_sendem_trips_assetspeople.sql` (2026-10-02).
+- **Grain**: **one row per Sendem asset per report date** -- the driver-grain feed (`staging.sendem_fact_trips_assetspeople_daily`, one row per asset/driver/site/day from `GET /api/aggregates/trips/assetspeople`) summed to the asset-day. Several drivers on one machine on one day are one row here, never several.
+- **Source**: `staging.sendem_fact_trips_assetspeople_daily` only (live rolling window plus the one-off backfill; no `clean.*` history exists for this feed), LEFT JOIN the combined asset/site dimensions.
+- **Provider value**: `Sendem`
+
+| Column | Meaning | Nullable? |
+|---|---|---|
+| `provider_asset_id` | Sendem `asset_id` (bigint) | No |
+| `asset_code`, `asset_name` | `fleet_number`, `description` from the combined asset dimension | Yes |
+| `group_id`, `site_id`, `site_name`, `spans_multiple_sites` | `site_id`/`site_name` are NULL / `'multiple_sites'` when the asset-day spans more than one site | Yes |
+| `driver_count`, `driver_row_count` | Distinct drivers, and driver rows, behind the row | No |
+| `engine_seconds`, `engine_hours` | `SUM(total_engine_second)`, and `/ 3600` rounded to 2 dp. **The comparable Sendem machine-hours figure.** NULL = Sendem stated no engine time for any driver row (unknown); 0 = it measured none | Yes |
+| `asset_driving_seconds`/`_hours`, `driver_driving_seconds`/`_hours`, `idle_seconds`/`_hours`, `trip_duration_seconds`/`_hours` | Supporting time measures, same roll-up. A forklift can run its engine for hours and drive nowhere | Yes |
+| `trip_count`, `distance_km`, `fuel_used_litres`, `energy_used_kwh` | Same totals as `vw_sendem_trips_daily` summed to the asset-day (reconciled: identical on every asset-day against a fresh API fetch) | Yes |
+| `data_quality_status` | `live`, or `engine_time_unknown` when `engine_seconds` is NULL | No |
+| `reporting_source` | `staging_live` | No |
+| `etl_last_updated` | `MAX(loaded_at)` of the driver rows | No |
+
+**Do not** sum driver rows yourself from the staging table and **do not** derive hours from trips, distance or trip duration: engine time is the figure, this view is the one place the roll-up lives, and Commercial (Tracking Watch / Tracking Health) reads it directly.
+
 ### `reporting.vw_daily_activity_all`
 
 - **Grain**: one row per provider per `provider_asset_id` per local `activity_date`.
+- **Since 030 (2026-10-02)**: the Sendem branch also LEFT JOINs `vw_sendem_asset_daily_activity` and fills `operating_minutes` (engine), `moving_minutes` (asset driving), `idle_minutes` and `duration_minutes` (trip duration) from it, as minutes rounded to 2 dp; the Sendem asset-day set is the UNION of trips, events and driver-feed days. Column names, types and order are unchanged.
 - **Why aggregation is needed**: none of the three providers share a native "one row per asset per day" shape once you look closely:
   - Trackunit's `staging.trackunit_daily_activity` **is already** that grain — used as-is (`data_grain = 'daily_native'`).
   - Sendem trips can have **multiple rows per asset per day** when an asset visits more than one site/group (confirmed against live data, e.g. asset `1260370989010284544` on `2026-03-04` has two site rows). These are summed to the day before being combined with the day-level event rollup.
@@ -297,10 +320,10 @@ at all in this codebase's staging tables.
 | Column | Trackunit | Sendem | EzyTrack |
 |---|---|---|---|
 | `work_day_minutes` | ✓ | NULL (no shift-boundary concept) | NULL |
-| `operating_minutes` | ✓ | NULL | NULL |
-| `moving_minutes` | ✓ (`active_driving_minutes`) | NULL | ✓ (`time_in_motion_seconds` summed) |
-| `idle_minutes`/`stop_minutes` | NULL | NULL | ✓ |
-| `duration_minutes` | NULL (use `work_day_minutes` — the equivalent concept) | NULL | ✓ (sum of trip durations) |
+| `operating_minutes` | ✓ | ✓ engine time (`engine_seconds / 60` from `vw_sendem_asset_daily_activity`); NULL when the driver feed has no engine time for the asset-day | NULL |
+| `moving_minutes` | ✓ (`active_driving_minutes`) | ✓ asset driving time (`asset_driving_seconds / 60`) | ✓ (`time_in_motion_seconds` summed) |
+| `idle_minutes`/`stop_minutes` | NULL | ✓ (`idle_seconds / 60`) / NULL | ✓ |
+| `duration_minutes` | NULL (use `work_day_minutes` — the equivalent concept) | ✓ (`trip_duration_seconds / 60`) | ✓ (sum of trip durations) |
 | `trip_count` | NULL (Trackunit has no trip concept) | ✓ | ✓ |
 | `event_count` | NULL | ✓ | NULL (no event source in this database) |
 | `distance_km` | ✓ | ✓ | ✓ |

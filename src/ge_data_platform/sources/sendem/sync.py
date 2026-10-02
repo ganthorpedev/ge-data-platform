@@ -76,12 +76,17 @@ def run(*, lookback_days: int | None = None, target: str = "legacy") -> None:
     try:
         print("Fetching Sendem data...")
         trips = client.get_trips_assets_daily(start_date, end_date)
+        # The driver-grain trip feed is fetched for the same window as the
+        # asset-level one: it is the only Sendem source of engine time, and
+        # it is loaded beside -- never instead of -- the asset-level feed.
+        trips_assets_people = client.get_trips_assets_people_daily(start_date, end_date)
         events = client.get_events_assets_daily(start_date, end_date)
         raw = {
             "assets": client.get_assets(),
             "sites": client.get_sites(),
             "event_descriptions": client.get_event_descriptions(),
             "trips": trips,
+            "trips_assets_people": trips_assets_people,
             "events": events,
         }
 
@@ -104,7 +109,7 @@ def run(*, lookback_days: int | None = None, target: str = "legacy") -> None:
         else:
             print("Skipping post-load validation for platform target (checks are hardcoded to legacy schema names)")
 
-        rows_fetched = len(trips) + len(events)
+        rows_fetched = len(trips) + len(trips_assets_people) + len(events)
         rows_loaded = sum(load_counts.values())
 
         loader.finish_sync_run(

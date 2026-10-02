@@ -59,6 +59,14 @@ from the old flat `sql/migrations/` layout, git history preserved. **Do not
 edit these for content** -- they are the historical record of exactly what
 was run against the live production database.
 
+The sequence is frozen in content, not closed: a change the legacy
+database still needs (every scheduled job writes to it) is added as the
+next number, in the same idempotent `BEGIN...COMMIT` style, and applied
+with the `psql` command below. `030_create_sendem_trips_assetspeople.sql`
+(2026-10-02, Sendem driver-grain trips and engine time; applied to the
+local `telemetry_warehouse_dev` restore, pending on production) is the
+first such addition since the move -- see `docs/sources/sendem.md`.
+
 **These are not "the same 001."** `sql/legacy/telemetry_migrations/001_create_sendem_schema.sql`
 and `sql/migrations/001_create_platform_schemas.sql` share a filename
 prefix by coincidence of both starting a sequence -- they target different

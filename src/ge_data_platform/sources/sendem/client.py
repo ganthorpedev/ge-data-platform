@@ -73,6 +73,24 @@ class SendemClient:
             params={"startDate": start_date, "endDate": end_date},
         )
 
+    def get_trips_assets_people_daily(self, start_date: int, end_date: int) -> list:
+        """Fetch daily trip aggregates per asset AND driver within a date range.
+
+        `GET /api/aggregates/trips/assetspeople/{groupId}` (Swagger model
+        `TripsAssetsPeople`) is the driver-grain sibling of
+        `get_trips_assets_daily`: one row per `DateKey`/`SiteId`/`AssetId`/
+        `DriverId`, carrying the engine-time fields the asset-level endpoint
+        does not (`TotalEngineSecond`, `TotalAssetDrivingTimeSeconds`,
+        `TotalDriverDrivingTimeSeconds`, `TotalIdleTimeSeconds`,
+        `TotalTripDuration`) beside the same trip count/distance/fuel/energy
+        totals. Same integer `YYYYMMDD` `startDate`/`endDate` window as the
+        other Sendem aggregates.
+        """
+        return self.get_json(
+            f"/api/aggregates/trips/assetspeople/{self.settings.sendem_group_id}",
+            params={"startDate": start_date, "endDate": end_date},
+        )
+
     def get_events_assets_daily(self, start_date: int, end_date: int) -> list:
         """Fetch daily event aggregates for assets within a date range."""
         return self.get_json(

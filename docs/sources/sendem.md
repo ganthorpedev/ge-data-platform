@@ -34,6 +34,102 @@ python -m ge_data_platform.sources.sendem.sync --lookback-days 14   # manual rec
 The `--lookback-days` CLI flag overrides `SYNC_LOOKBACK_DAYS` for one
 invocation only -- it does not change the configured default.
 
+## Engine time: the driver-grain trip feed
+
+**Status: IMPLEMENTED 2026-10-02 (code, migrations, backfill script);
+APPLIED and backfilled on the local `telemetry_warehouse_dev` restore
+(2026-07-09..2026-10-02); NOT yet applied to the production
+`telemetry_warehouse` or `ge_warehouse` -- see "Rolling out" below.**
+
+The asset-level aggregate (`GET /api/aggregates/trips/assets`) carries
+trips, distance, fuel and energy and **no engine or runtime time**, so a
+Sendem machine could only ever prove "activity" to Commercial, never a
+comparable hours figure. Its driver-grain sibling,
+`GET /api/aggregates/trips/assetspeople/{groupId}` (Swagger model
+`TripsAssetsPeople`, `SendemClient.get_trips_assets_people_daily`), returns
+the same trip count/distance/fuel/energy totals **per `DriverId`** plus
+`TotalEngineSecond`, `TotalAssetDrivingTimeSeconds`,
+`TotalDriverDrivingTimeSeconds`, `TotalIdleTimeSeconds` and
+`TotalTripDuration`. Every sync run now fetches it for the same window,
+beside -- never instead of -- the asset-level feed.
+
+| Object | Grain | Key |
+|---|---|---|
+| `raw.sendem_trips_assetspeople_daily` (`raw_sendem.trip_driver_daily` on the platform target) | one row per asset, driver, site, day -- source-faithful | `(date_key, group_id, site_id, asset_id, driver_id)` |
+| `staging.sendem_fact_trips_assetspeople_daily` (`stg_sendem.trip_driver_daily`) | same grain, enriched with asset/site attributes like `sendem_fact_trips_daily` | same |
+| `reporting.vw_sendem_asset_daily_activity` | **one row per asset per day**: the driver rows summed | `(date_key, provider_asset_id)` |
+
+DDL: `sql/legacy/telemetry_migrations/030_create_sendem_trips_assetspeople.sql`
+(legacy) and `sql/migrations/015_create_sendem_trip_driver_daily.sql`
+(platform). Both are idempotent and additive; `030` also re-creates
+`reporting.vw_daily_activity_all` so its Sendem branch fills
+`operating_minutes` (engine), `moving_minutes` (asset driving),
+`idle_minutes` and `duration_minutes` (trip duration) from the new view
+without changing any column's name, type or position.
+`reporting.vw_sendem_trips_daily` is untouched.
+
+**Aggregation rule (lives only in the view).** `engine_seconds =
+SUM(total_engine_second)` over every driver/site row of the asset-day;
+`engine_hours = ROUND(engine_seconds / 3600, 2)`; the same for driving,
+idle and trip-duration seconds; `driver_count`, `driver_row_count`,
+`trip_count`, `distance_km` beside them. Because the primary key includes
+`driver_id` and the loader UPSERTs on it, a re-run of any window rewrites
+the same driver rows and can never inflate the roll-up.
+
+**Null vs zero.** `SUM` ignores NULLs and is NULL only when every input is
+NULL: driver rows with `total_engine_second = 0` roll up to `engine_seconds
+= 0` (a measured nought); rows with it NULL throughout roll up to NULL
+(unknown, `data_quality_status = 'engine_time_unknown'`). Nothing in the
+transform, loader or view coalesces one into the other. (Observed on the
+2026-07-09..10-02 window: 0 unknown asset-days, 499 measured-nought,
+5,821 positive.) A nought *beside trips on the same day* is a
+contradiction some units produce (they report trips without sensing the
+engine); the view reports it as Sendem stated it and Commercial treats
+that day's engine figure as unusable, not nought.
+
+**Proof (2026-10-02, `telemetry_warehouse_dev`, `scripts/validate_sendem_engine_hours.py`).**
+Fleet 9308 (AssetId `1535407637279948800`), 21-30 Sep 2026: 3.88, 6.58,
+0.08, 0.13, 0.91, 3.40, 3.32, 2.59, 2.76, 6.51 engine hours from 3-6
+driver rows per day -- e.g. 26 Sep is 29 + 12058 + 56 + 114 = 12257 s =
+3.40 h, 15 trips, 2.9 km, which the asset-level feed states as 15 trips,
+2.9 km. Fleet 4172 on 20 Jul (10 drivers, 54109 s) and 8818 on 10 Jul
+(1 driver, 774996 s) each aggregate once. Over all 6,326 asset-days the
+roll-up's trip count and distance match a fresh asset-level API fetch on
+every day; the 118 asset-days where they differ from the *stored*
+asset-level rows are late-arriving trips the stored rows (loaded up to
+2026-10-01 09:35) predate. Re-running the 21-30 Sep window left the row
+count (12,844) and the engine-second total unchanged.
+
+**Backfill.** The scheduled sync only covers its rolling window, so
+history is loaded once with the same client, transform and UPSERT:
+
+```powershell
+python -m scripts.backfill_sendem_trips_assetspeople --date-from 2026-07-09 --date-to 2026-10-02
+python -m scripts.backfill_sendem_trips_assetspeople --date-from 2026-07-09 --date-to 2026-10-02 --database telemetry_warehouse_dev
+python -m scripts.backfill_sendem_trips_assetspeople --date-from 2026-07-09 --date-to 2026-10-02 --target platform
+```
+
+It takes the Sendem overlap lock, walks the range in 14-day windows,
+UPSERTs on the natural key (re-runnable, overlap-safe), records
+`job_name = sendem_assetspeople_backfill` in `etl.sync_runs` /
+`ops.pipeline_run`, and refuses a non-local `POSTGRES_HOST` unless
+`--allow-remote-host` is given. No `clean.*` history exists for this feed
+(the API only serves it from the current retention window), so
+`scripts/backfill_sendem_historical.py` has nothing to copy for it.
+
+**Rolling out** (not done by the change that introduced this):
+
+1. Apply `030_create_sendem_trips_assetspeople.sql` to the production
+   `telemetry_warehouse` (and `015_...` to `ge_warehouse` via
+   `scripts.setup_ge_warehouse --migrate`).
+2. Deploy this code; the next `sendem_sync_schedule` run loads the feed.
+3. Run the backfill above for the window Commercial's Tracking Watch
+   reads (the asset-level feed's own history starts 2026-06-24 live).
+4. `reporting.vw_hours_control_telemetry_evidence` (the governed
+   Commercial view, production only) still carries no engine fields for
+   Sendem; Commercial reads engine time through the provider views
+   (`TELEMETRY_DATABASE_URL`) today.
+
 ## Retry behavior
 
 Uses the shared retry session (`ge_data_platform.common.http.build_retrying_session`):

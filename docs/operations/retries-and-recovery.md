@@ -162,6 +162,16 @@ transform/retry/empty-payload behavior, opt-in and manual-only (no Dagster
 schedule passes it), same pattern as Trackunit's `--target platform`. See
 `docs/migration/legacy-to-platform-migration.md#sendem-migration`.
 
+The driver-grain trip feed (engine time) is part of every sync run since
+2026-10-02. History beyond the rolling window is loaded once, re-runnably,
+with the same UPSERT and the same overlap lock:
+
+```powershell
+python -m scripts.backfill_sendem_trips_assetspeople --date-from 2026-07-09 --date-to 2026-10-02
+```
+
+See `docs/sources/sendem.md#engine-time-the-driver-grain-trip-feed`.
+
 **EzyTrack** -- normal catch-up, or reconciliation for a gap the catch-up
 cap can't reach:
 

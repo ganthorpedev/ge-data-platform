@@ -62,11 +62,13 @@ _LEGACY_SENDEM_TABLES = {
     "raw_sites": ("raw", "sendem_sites"),
     "raw_event_descriptions": ("raw", "sendem_event_descriptions"),
     "raw_trips": ("raw", "sendem_trips_assets_daily"),
+    "raw_trips_assets_people": ("raw", "sendem_trips_assetspeople_daily"),
     "raw_events": ("raw", "sendem_events_assets_daily"),
     "staging_dim_assets": ("staging", "sendem_dim_assets"),
     "staging_dim_sites": ("staging", "sendem_dim_sites"),
     "staging_dim_event_types": ("staging", "sendem_dim_event_types"),
     "staging_fact_trips": ("staging", "sendem_fact_trips_daily"),
+    "staging_fact_trips_assets_people": ("staging", "sendem_fact_trips_assetspeople_daily"),
     "staging_fact_events": ("staging", "sendem_fact_events_daily"),
 }
 _PLATFORM_SENDEM_TABLES = {
@@ -74,13 +76,19 @@ _PLATFORM_SENDEM_TABLES = {
     "raw_sites": ("raw_sendem", "site"),
     "raw_event_descriptions": ("raw_sendem", "event_description"),
     "raw_trips": ("raw_sendem", "trip_daily"),
+    "raw_trips_assets_people": ("raw_sendem", "trip_driver_daily"),
     "raw_events": ("raw_sendem", "event_daily"),
     "staging_dim_assets": ("stg_sendem", "asset"),
     "staging_dim_sites": ("stg_sendem", "site"),
     "staging_dim_event_types": ("stg_sendem", "event_type"),
     "staging_fact_trips": ("stg_sendem", "trip_daily"),
+    "staging_fact_trips_assets_people": ("stg_sendem", "trip_driver_daily"),
     "staging_fact_events": ("stg_sendem", "event_daily"),
 }
+# The driver-grain trip feed's natural key: one row per asset, driver, site
+# and day (GET /api/aggregates/trips/assetspeople). Shared by the raw and
+# staging tables and by scripts/backfill_sendem_trips_assetspeople.py.
+SENDEM_TRIPS_ASSETS_PEOPLE_KEY = ["date_key", "group_id", "site_id", "asset_id", "driver_id"]
 
 _LEGACY_EZYTRACK_TABLES = {
     "raw_assets": ("raw", "ezytrack_assets"),
@@ -126,6 +134,24 @@ POST_LOAD_VALIDATION_QUERIES: dict[str, list[tuple[str, str, bool]]] = {
                  OR total_trip_distance_kilometres < 0
                  OR total_fuel_used_litres < 0
                  OR total_energy_used_kwh < 0
+              )
+            """,
+            True,
+        ),
+        (
+            "recent negative driver-grain trip or engine-time metrics",
+            """
+            SELECT COUNT(*)
+            FROM staging.sendem_fact_trips_assetspeople_daily
+            WHERE loaded_at >= CURRENT_TIMESTAMP - make_interval(hours => :lookback_hours)
+              AND (
+                    total_trip_count < 0
+                 OR total_trip_distance_kilometres < 0
+                 OR total_engine_second < 0
+                 OR total_asset_driving_time_seconds < 0
+                 OR total_driver_driving_time_seconds < 0
+                 OR total_idle_time_seconds < 0
+                 OR total_trip_duration < 0
               )
             """,
             True,
@@ -745,7 +771,16 @@ class PostgresLoader:
         """Load all Sendem raw and staging tables from the given dataframes.
 
         `dataframes` is expected to contain: assets_df, sites_df, event_desc_df,
-        dim_event_types_df, trips_df, events_df, fact_trips, fact_events.
+        dim_event_types_df, trips_df, trips_people_df, events_df, fact_trips,
+        fact_trips_assets_people, fact_events.
+
+        `trips_people_df`/`fact_trips_assets_people` are the driver-grain
+        trip feed (GET /api/aggregates/trips/assetspeople), keyed on
+        SENDEM_TRIPS_ASSETS_PEOPLE_KEY: one row per asset, driver, site and
+        day, exactly as Sendem states it. Re-running a window UPSERTs the
+        same keys and can never duplicate a driver row, which is what keeps
+        the asset-day roll-up in reporting.vw_sendem_asset_daily_activity
+        from double counting.
 
         `event_desc_df` (raw, exactly what the Sendem API returned) feeds
         the raw event-descriptions table. `dim_event_types_df` (event_desc_df
@@ -803,6 +838,20 @@ class PostgresLoader:
                 *tables["staging_fact_events"],
                 dataframes["fact_events"],
                 ["date_key", "group_id", "site_id", "asset_id", "event_type_id"],
+            ),
+            # The driver-grain feed loads last, raw then staging, so a
+            # failure in the newer feed (an unexpected payload shape, say)
+            # is recorded against its own table loads after every
+            # long-established table has already landed.
+            (
+                *tables["raw_trips_assets_people"],
+                dataframes["trips_people_df"],
+                SENDEM_TRIPS_ASSETS_PEOPLE_KEY,
+            ),
+            (
+                *tables["staging_fact_trips_assets_people"],
+                dataframes["fact_trips_assets_people"],
+                SENDEM_TRIPS_ASSETS_PEOPLE_KEY,
             ),
         ]
 
