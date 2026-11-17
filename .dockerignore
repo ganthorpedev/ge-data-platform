@@ -1,0 +1,22 @@
+.git
+.idea
+.vscode
+.venv
+venv
+env
+**/__pycache__
+**/*.pyc
+*.egg-info
+.pytest_cache
+.ge_data_platform_locks
+.telemetry_etl_locks
+notebooks
+data
+*.dump
+*.csv
+*.xlsx
+*.log
+# Never bake credentials into the image.
+.env
+.env.*
+deploy/compose/.env

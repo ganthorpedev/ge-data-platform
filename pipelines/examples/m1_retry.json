@@ -1,0 +1,9 @@
+{
+  "pipeline_key": "m1_retry",
+  "name": "M1 retry: fails twice, succeeds on attempt 3",
+  "max_active_runs": 5,
+  "nodes": [
+    {"key": "flaky", "step": "core.fail_n_times", "params": {"fail_times": 2},
+     "retry": {"max_attempts": 3, "backoff_seconds": 3, "backoff_max_seconds": 30}}
+  ]
+}

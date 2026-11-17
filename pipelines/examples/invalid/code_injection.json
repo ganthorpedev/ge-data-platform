@@ -1,0 +1,7 @@
+{
+  "pipeline_key": "bad_code",
+  "name": "Invalid: attempts to attach code to a node",
+  "nodes": [
+    {"key": "c", "step": "core.noop", "code": "import os; os.system('id')"}
+  ]
+}

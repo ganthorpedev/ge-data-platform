@@ -1,0 +1,10 @@
+{
+  "pipeline_key": "bad_cycle",
+  "name": "Invalid: cycle",
+  "nodes": [
+    {"key": "a", "step": "core.noop"},
+    {"key": "b", "step": "core.noop"},
+    {"key": "c", "step": "core.noop"}
+  ],
+  "edges": [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}, {"from": "c", "to": "a"}]
+}
