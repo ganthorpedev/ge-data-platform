@@ -64,6 +64,7 @@ scripts/                  operational entry points (ge_warehouse setup, EzyTrack
 | | |
 |---|---|
 | **Architecture** | [`docs/architecture/`](docs/architecture/) -- platform overview, data layers, database architecture, naming conventions, decision record |
+| **GE Data Control Center** | [`docs/control-center/`](docs/control-center/) -- the platform's own orchestrator (replaces Dagster): decisions ADR-009..021, local quick start, M1 manual test checklist |
 | **Sources** | [`docs/sources/`](docs/sources/) -- one document per source system |
 | **Warehouse** | [`docs/warehouse/`](docs/warehouse/) -- core model, marts, reporting layer, source mapping, `dim_date` |
 | **Operations** | [`docs/operations/`](docs/operations/) -- pipeline operations, monitoring/alerting, retries/recovery, data quality |

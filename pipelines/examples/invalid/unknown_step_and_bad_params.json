@@ -1,0 +1,9 @@
+{
+  "pipeline_key": "bad_refs",
+  "name": "Invalid: unknown step, bad params, dangling edge",
+  "nodes": [
+    {"key": "a", "step": "core.does_not_exist"},
+    {"key": "b", "step": "core.sleep", "params": {"seconds": -5, "shell": "rm -rf /"}}
+  ],
+  "edges": [{"from": "b", "to": "missing"}]
+}

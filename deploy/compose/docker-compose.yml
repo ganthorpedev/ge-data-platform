@@ -1,0 +1,127 @@
+# GE Data Control Center -- LOCAL DEVELOPMENT stack (M1).
+#
+#   docker compose -f deploy/compose/docker-compose.yml up -d --build
+#   docker compose -f deploy/compose/docker-compose.yml up -d --scale worker=2
+#
+# Two logically separate PostgreSQL servers (ADR-010):
+#   control-db   -> database ge_control   (orchestration state)   127.0.0.1:55432
+#   warehouse-db -> database ge_warehouse (data, local copy only) 127.0.0.1:55433
+# Ports bind to 127.0.0.1 only and deliberately avoid 5432 so a developer's
+# own local PostgreSQL is never touched.
+#
+# Passwords below are local-development defaults. Override them via a
+# deploy/compose/.env file (git-ignored) for anything shared.
+#
+# The image contains NO Dagster: the build fails if `dagster` is importable.
+
+name: gecc
+
+x-gecc-image: &gecc-image
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+  image: ge-data-control-center:dev
+
+x-gecc-env: &gecc-env
+  GECC_ENVIRONMENT: local
+  GECC_LEASE_SECONDS: "30"
+  GECC_HEARTBEAT_SECONDS: "5"
+
+services:
+  control-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ge_control
+      POSTGRES_USER: gecc_admin
+      POSTGRES_PASSWORD: ${GECC_ADMIN_DB_PASSWORD:-gecc_admin_dev}
+      GECC_API_DB_PASSWORD: ${GECC_API_DB_PASSWORD:-gecc_api_dev}
+      GECC_WORKER_DB_PASSWORD: ${GECC_WORKER_DB_PASSWORD:-gecc_worker_dev}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - control-db-data:/var/lib/postgresql/data
+      - ./init/control:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gecc_admin -d ge_control"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  warehouse-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ge_warehouse
+      POSTGRES_USER: ge_wh_admin
+      POSTGRES_PASSWORD: ${GE_WAREHOUSE_DB_PASSWORD:-ge_wh_admin_dev}
+    ports:
+      - "127.0.0.1:55433:5432"
+    volumes:
+      - warehouse-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ge_wh_admin -d ge_warehouse"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # One-shot: apply ge_warehouse migrations with the EXISTING platform script
+  # (unchanged), against the local warehouse container only.
+  warehouse-setup:
+    <<: *gecc-image
+    command: ["python", "-m", "scripts.setup_ge_warehouse", "--all"]
+    environment:
+      POSTGRES_HOST: warehouse-db
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ge_wh_admin
+      POSTGRES_PASSWORD: ${GE_WAREHOUSE_DB_PASSWORD:-ge_wh_admin_dev}
+      GE_WAREHOUSE_DB: ge_warehouse
+    depends_on:
+      warehouse-db:
+        condition: service_healthy
+    restart: "no"
+
+  # One-shot: control-plane migrations + step registry sync (admin login).
+  bootstrap:
+    <<: *gecc-image
+    command: ["sh", "-c", "gecc migrate && gecc registry sync"]
+    environment:
+      <<: *gecc-env
+      GECC_CONTROL_DB_URL: postgresql+psycopg2://gecc_admin:${GECC_ADMIN_DB_PASSWORD:-gecc_admin_dev}@control-db:5432/ge_control
+      GECC_ACTOR: compose-bootstrap
+    depends_on:
+      control-db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *gecc-image
+    command: ["gecc", "api", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *gecc-env
+      GECC_CONTROL_DB_URL: postgresql+psycopg2://gecc_api:${GECC_API_DB_PASSWORD:-gecc_api_dev}@control-db:5432/ge_control
+      GECC_API_TOKEN: ${GECC_API_TOKEN:-gecc-local-dev-token}
+    ports:
+      - "127.0.0.1:58000:8000"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    <<: *gecc-image
+    command: ["gecc", "worker", "--queues", "default", "--capacity", "2"]
+    environment:
+      <<: *gecc-env
+      GECC_CONTROL_DB_URL: postgresql+psycopg2://gecc_worker:${GECC_WORKER_DB_PASSWORD:-gecc_worker_dev}@control-db:5432/ge_control
+      GECC_WAREHOUSE_DB_URL: postgresql+psycopg2://ge_wh_admin:${GE_WAREHOUSE_DB_PASSWORD:-ge_wh_admin_dev}@warehouse-db:5432/ge_warehouse
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      warehouse-setup:
+        condition: service_completed_successfully
+    # Let in-flight attempts drain (GECC_DRAIN_SECONDS default 20) before SIGKILL.
+    stop_grace_period: 40s
+    restart: unless-stopped
+
+volumes:
+  control-db-data:
+  warehouse-db-data:

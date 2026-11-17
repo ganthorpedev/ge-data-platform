@@ -44,3 +44,6 @@ Thumbs.db
 
 # Local csv and data files
 data/local
+# GE Data Control Center
+!.env.control-center.example
+pipelines/scratch/

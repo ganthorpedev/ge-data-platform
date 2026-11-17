@@ -1,0 +1,25 @@
+{
+  "spec_version": 1,
+  "pipeline_key": "m1_demo",
+  "name": "M1 demo: DAG ordering, retry, read-only warehouse validation",
+  "description": "extract -> flaky (fails once, then succeeds) -> validate_warehouse -> report",
+  "owner": "data-platform",
+  "max_active_runs": 1,
+  "nodes": [
+    {"key": "extract", "step": "core.noop", "params": {"message": "pretend extract"}},
+    {"key": "flaky", "step": "core.fail_n_times", "params": {"fail_times": 1}, "retry": {"max_attempts": 3, "backoff_seconds": 2}},
+    {"key": "validate_warehouse", "step": "warehouse.validate_ge_warehouse_baseline"},
+    {"key": "report", "step": "core.noop", "params": {"message": "all done"}}
+  ],
+  "edges": [
+    {"from": "extract", "to": "flaky"},
+    {"from": "flaky", "to": "validate_warehouse"},
+    {"from": "validate_warehouse", "to": "report"}
+  ],
+  "ui_layout": {
+    "extract": {"x": 0, "y": 0},
+    "flaky": {"x": 220, "y": 0},
+    "validate_warehouse": {"x": 440, "y": 0},
+    "report": {"x": 660, "y": 0}
+  }
+}

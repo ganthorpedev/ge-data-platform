@@ -1,0 +1,8 @@
+{
+  "pipeline_key": "m1_timeout",
+  "name": "M1 timeout: 120s sleep with a 10s timeout, 2 attempts",
+  "nodes": [
+    {"key": "too_slow", "step": "core.sleep", "params": {"seconds": 120}, "timeout_seconds": 10,
+     "retry": {"max_attempts": 2, "backoff_seconds": 1}}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "pipeline_key": "m1_sleep",
+  "name": "M1 sleep: long-running step for kill / lease-recovery / cancel tests",
+  "description": "Concurrency key demo:exclusive (limit 1) serialises runs even though max_active_runs is 5.",
+  "max_active_runs": 5,
+  "nodes": [
+    {"key": "nap", "step": "core.sleep", "params": {"seconds": 60, "progress_every_seconds": 5},
+     "concurrency_keys": ["demo:exclusive"], "retry": {"max_attempts": 3, "backoff_seconds": 2}}
+  ]
+}
